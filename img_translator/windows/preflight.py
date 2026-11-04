@@ -35,7 +35,7 @@ def check_capture() -> None:
     import numpy as np
     from PIL import Image
 
-    with mss.mss() as sct:
+    with mss.MSS() as sct:
         mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
         shot = sct.grab(mon)
         img = np.frombuffer(shot.rgb, dtype=np.uint8).reshape(shot.height, shot.width, 3)

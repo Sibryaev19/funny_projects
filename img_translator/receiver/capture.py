@@ -26,7 +26,7 @@ class MSSCapture:
     def __init__(self):
         import mss
 
-        self._mss = mss.mss()
+        self._mss = mss.MSS()
         self._snaps = Path(tempfile.mkdtemp(prefix="imgtr_snap_"))
 
     def grab(self, region: tuple[int, int, int, int]) -> np.ndarray:

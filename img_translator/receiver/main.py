@@ -12,6 +12,7 @@ import argparse
 import io
 import os
 import sys
+import tempfile
 import time
 import zipfile
 from datetime import datetime
@@ -42,7 +43,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--capture", choices=["auto", "mss", "wayland"], default="auto",
                    help="способ захвата экрана (auto: wayland-сессия => портал)")
     p.add_argument("--debug", action="store_true",
-                   help="сохранять неудачные снимки и статистику в /tmp/imgtr_debug")
+                   help="сохранять неудачные снимки и статистику в папку temp/imgtr_debug")
     p.add_argument("--region", type=str, default=None, metavar=REGION_HINT,
                    help="область экрана; без флага запустятся ножницы")
     p.add_argument("--out", type=str, default=None,
@@ -218,18 +219,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.region:
         region = parse_region(args.region)
     else:
-        # автопоиск: рамку ищем на всём кадре потока (передатчик должен работать)
+        # автопоиск: рамку ждём до победного — успей отодвинуть окна,
+        # перекрывающие кадр; каждая попытка — со свежим снимком.
         import PIL.Image
 
-        snap_path = cap.snapshot_path()
-        snap = np.array(PIL.Image.open(snap_path).convert("RGB"))
+        print("ищу рамку передатчика... (отодвиньте перекрывающие окна; Ctrl+C — выход)")
+        attempt = 0
         try:
-            region = find_frame_region(snap)
-            print(f"рамка найдена автоматически: {region[0]},{region[1]} "
-                  f"{region[2]}x{region[3]}px из кадра {snap.shape[1]}x{snap.shape[0]}")
-        except VisionError as e:
-            print(f"автопоиск рамки не удался ({e}); выберите область мышью")
-            region = select_region(background_path=snap_path)
+            while True:
+                snap_path = cap.snapshot_path()
+                snap = np.array(PIL.Image.open(snap_path).convert("RGB"))
+                try:
+                    region = find_frame_region(snap)
+                    print(f"\rрамка найдена автоматически: {region[0]},{region[1]} "
+                          f"{region[2]}x{region[3]}px из кадра {snap.shape[1]}x{snap.shape[0]}")
+                    break
+                except VisionError as e:
+                    attempt += 1
+                    sys.stdout.write(f"\r  ...не найдена ({e}); жду ({attempt})     ")
+                    sys.stdout.flush()
+                    time.sleep(1.0)
+        except KeyboardInterrupt:
+            print("\nвыход")
+            return 130
     if region is None:
         print("область не выбрана — выход")
         cap.close()
@@ -247,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         data = receive(region, (w, h), args.colors, args.fps, args.timeout,
                        progress, capture=cap,
-                       debug_dir=Path("/tmp/imgtr_debug") if args.debug else None)
+                       debug_dir=Path(tempfile.gettempdir()) / "imgtr_debug" if args.debug else None)
     except KeyboardInterrupt:
         print("\nостановлено пользователем")
         return 130
