@@ -29,6 +29,10 @@
 
 ## 2. Установка (в venv, систему не засоряем)
 
+> **Windows без Python в PATH** — см. [windows/README.md](windows/README.md):
+> там `install.bat` (сам найдёт Python, создаст `.venv`, поставит зависимости)
+> и bat-файлы для запуска всего одним нажатием.
+
 ### Windows
 
 ```bat

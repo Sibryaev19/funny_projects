@@ -11,4 +11,7 @@ received/
 # --- Системное ---
 .DS_Store
 Thumbs.db
+
+# --- Снимок из windows/preflight.py ---
+windows/preflight_shot.png
 .idea/

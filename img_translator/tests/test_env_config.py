@@ -107,6 +107,30 @@ def main() -> None:
             import shutil as _shutil
             _shutil.rmtree(Path(".for_agent/test/env_out"), ignore_errors=True)
 
+        # 7. приёмник: apply_env_defaults подхватывает .env, CLI побеждает
+        import receiver.main as receiver_main
+
+        tmp_recv = TMP_ENV.with_name(".env_test_recv")
+        tmp_recv.write_text(
+            "GRID_W=200\nGRID_H=150\nCOLORS=8\nFPS=6\n", encoding="utf-8"
+        )
+        envconfig.ENV_PATH = tmp_recv
+        try:
+            args = receiver_main.parse_args([])
+            receiver_main.apply_env_defaults(args)
+            assert args.grid == [200, 150] and args.colors == 8 and args.fps == 6.0, args
+            args = receiver_main.parse_args(["--grid", "64", "48", "--colors", "4", "--fps", "3"])
+            receiver_main.apply_env_defaults(args)
+            assert args.grid == [64, 48] and args.colors == 4 and args.fps == 3.0, args
+            tmp_recv.write_text("GRID_W=abc\nCOLORS=3\nFPS=много\n", encoding="utf-8")
+            args = receiver_main.parse_args([])
+            receiver_main.apply_env_defaults(args)
+            assert args.grid == [128, 96] and args.colors == 16 and args.fps == 4.0, args
+            print("ok: apply_env_defaults (env, CLI, кривые значения)")
+        finally:
+            envconfig.ENV_PATH = envconfig.PROJECT_ROOT / ".env"
+            tmp_recv.unlink(missing_ok=True)
+
         print("ВСЕ ТЕСТЫ ENV-ДЕФОЛТОВ ПРОЙДЕНЫ")
     finally:
         cleanup()

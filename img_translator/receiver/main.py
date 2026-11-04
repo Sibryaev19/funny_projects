@@ -33,12 +33,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="receiver",
         description="Приёмник визуального канала img_translator",
     )
-    p.add_argument("--grid", nargs=2, type=int, default=[128, 96], metavar=("W", "H"),
-                   help="сетка кадра в ячейках (по умолчанию 128 96)")
-    p.add_argument("--colors", type=int, default=16, choices=E.PALETTE_ORDER,
-                   help="число цветов палитры (по умолчанию 16)")
-    p.add_argument("--fps", type=float, default=4.0,
-                   help="снимков в секунду (по умолчанию 4)")
+    p.add_argument("--grid", nargs=2, type=int, default=None, metavar=("W", "H"),
+                   help="сетка кадра в ячейках; по умолчанию GRID_W/GRID_H из .env, иначе 128 96")
+    p.add_argument("--colors", type=int, default=None, choices=E.PALETTE_ORDER,
+                   help="число цветов палитры; по умолчанию COLORS из .env, иначе 16")
+    p.add_argument("--fps", type=float, default=None,
+                   help="снимков в секунду; по умолчанию FPS из .env, иначе 4")
     p.add_argument("--capture", choices=["auto", "mss", "wayland"], default="auto",
                    help="способ захвата экрана (auto: wayland-сессия => портал)")
     p.add_argument("--debug", action="store_true",
@@ -51,6 +51,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="секунд до сдачи; 0 = без лимита, пока не соберёт всё "
                         "(прервать Ctrl+C); по умолчанию 0")
     return p.parse_args(argv)
+
+
+def apply_env_defaults(args: argparse.Namespace) -> None:
+    """Заполняет незаданные grid/colors/fps из .env (GRID_W/H, COLORS, FPS)."""
+    raw = load_env()
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(raw[key])
+        except (KeyError, ValueError):
+            return default
+
+    if args.grid is None:
+        args.grid = [_int("GRID_W", 128), _int("GRID_H", 96)]
+    if args.colors is None:
+        colors = _int("COLORS", 16)
+        args.colors = colors if colors in E.PALETTE_ORDER else 16
+    if args.fps is None:
+        try:
+            args.fps = float(raw["FPS"])
+        except (KeyError, ValueError):
+            args.fps = 4.0
 
 
 def parse_region(s: str) -> tuple[int, int, int, int]:
@@ -180,6 +202,9 @@ def unpack(data: bytes, out_arg: str | None) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    apply_env_defaults(args)
+    if args.colors not in E.PALETTE_ORDER:
+        raise SystemExit(f"--colors: ожидалось одно из {E.PALETTE_ORDER}")
     w, h = args.grid
     try:
         E.validate_grid(w, h)
