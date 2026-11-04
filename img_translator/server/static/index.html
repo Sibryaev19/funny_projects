@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>img_translator — передатчик</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #f5f5f5; color: #222; }
+  h1 { font-size: 1.2em; }
+  #paths { margin: 10px 0; }
+  #paths li { font-family: monospace; }
+  #stage { background: #ddd; padding: 10px; display: inline-block; }
+  canvas { background: #fff; image-rendering: pixelated; max-width: 100%; height: auto; }
+  #controls { margin: 10px 0; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button { padding: 6px 12px; }
+  #status { font-family: monospace; white-space: pre; }
+  label { font-size: 0.9em; }
+</style>
+</head>
+<body>
+<h1>Передатчик-имитатор</h1>
+
+<div id="controls">
+  <button onclick="pick()">Добавить</button>
+  <button id="btnTransmit" onclick="transmit()">Передать</button>
+  <button onclick="clearAll()">Очистить</button>
+</div>
+
+<ul id="paths"></ul>
+
+<div id="controls">
+  <label>Сетка: <input id="gridW" type="number" value="128" min="16" max="512" step="8" style="width:60px"> ×
+  <input id="gridH" type="number" value="96" min="16" max="512" step="8" style="width:60px"> ячеек</label>
+  <label>Ячейка: <input id="cellPx" type="number" value="10" min="2" max="32" style="width:50px"> px</label>
+  <label>Цветов:
+    <select id="paletteN">
+      <option value="2">2</option>
+      <option value="4">4</option>
+      <option value="8">8</option>
+      <option value="16">16</option>
+    </select>
+  </label>
+  <span id="capacityInfo"></span>
+</div>
+
+<div id="controls">
+  <button id="btnPlay" onclick="togglePlay()" disabled>Пауза</button>
+  <label>Пауза между кадрами, мс: <input id="delay" type="number" value="500" min="50" step="50" style="width:70px"></label>
+  <label><input id="loop" type="checkbox" checked> цикл</label>
+  <button id="btnFull" onclick="goFullscreen()" disabled>Во весь экран</button>
+</div>
+
+<div id="stage"><canvas id="canvas" width="640" height="480"></canvas></div>
+<pre id="status">Выбери файлы или папки и нажми «Передать».</pre>
+
+<script>
+let frames = [];
+let current = 0;
+let playing = true;
+let timer = null;
+let PALETTES = {};      // {2: [[r,g,b],...], ...} с сервера
+let curPalette = 2;     // палитра, которой закодированы frames
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const pathsEl = document.getElementById('paths');
+let selectedPaths = [];
+
+fetch('/api/palettes').then(r => r.json()).then(d => { PALETTES = d; applyConfig(); });
+
+// дефолты из .env (см. ENV_FILE в server/app.py): поля + папка по умолчанию
+function applyConfig() {
+  fetch('/api/config').then(r => r.json()).then(cfg => {
+    document.getElementById('gridW').value = cfg.grid_w;
+    document.getElementById('gridH').value = cfg.grid_h;
+    document.getElementById('cellPx').value = cfg.cell_px;
+    document.getElementById('paletteN').value = String(cfg.colors);
+    document.getElementById('delay').value = cfg.delay_ms;
+    document.getElementById('loop').checked = cfg.loop;
+    if (cfg.default_folder) {
+      selectedPaths = [cfg.default_folder];
+      renderPaths();
+    }
+    updateCapacity();
+    renderPreview();
+  }).catch(() => { updateCapacity(); renderPreview(); });
+}
+
+function paletteColor(n, idx) {
+  const c = (PALETTES[String(n)] || [[255,255,255]])[idx] || [255,255,255];
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+function renderPaths() {
+  pathsEl.innerHTML = '';
+  selectedPaths.forEach((p, i) => {
+    const li = document.createElement('li');
+    const span = document.createElement('span');
+    span.textContent = p;
+    const btn = document.createElement('button');
+    btn.textContent = '✕';
+    btn.title = 'убрать';
+    btn.onclick = () => { selectedPaths.splice(i, 1); renderPaths(); };
+    li.append(span, ' ', btn);
+    pathsEl.appendChild(li);
+  });
+}
+
+async function post(url, body) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body || {}),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+async function pick() {
+  try {
+    const data = await post('/api/pick');
+    selectedPaths.push(...data.paths);
+    renderPaths();
+  } catch (e) { statusEl.textContent = 'Ошибка выбора: ' + e.message; }
+}
+
+async function transmit() {
+  if (!selectedPaths.length) { statusEl.textContent = 'Список пуст.'; return; }
+  statusEl.textContent = 'Кодирую...';
+  try {
+    const grid = [parseInt(document.getElementById('gridW').value, 10),
+                  parseInt(document.getElementById('gridH').value, 10)];
+    const palette = parseInt(document.getElementById('paletteN').value, 10);
+    const data = await post('/api/transmit', {paths: selectedPaths, grid, palette});
+    frames = data.frames;
+    curPalette = data.palette;
+    current = 0;
+    document.getElementById('btnPlay').disabled = false;
+    document.getElementById('btnFull').disabled = false;
+    const info = `архив: ${data.zip_size} байт, кадров: ${frames.length}, сетка: ${data.grid[0]}x${data.grid[1]}, цветов: ${data.palette}`;
+    statusEl.dataset.info = info;
+    statusEl.textContent = info;
+    playing = true;
+    document.getElementById('btnPlay').textContent = 'Пауза';
+    showFrame(0);
+    schedule();
+  } catch (e) { statusEl.textContent = 'Ошибка передачи: ' + e.message; }
+}
+
+function showFrame(i) {
+  const rows = frames[i].rows;
+  const h = rows.length, w = rows[0].length;
+  drawCells(w, h, (x, y) => {
+    const ch = rows[y][x];
+    if (ch === 'M') return '#f0f';
+    return paletteColor(curPalette, parseInt(ch, 16));
+  });
+  statusEl.textContent =
+    `кадр ${frames[i].index + 1} / ${frames[i].total}` +
+    (statusEl.dataset.info ? '\n' + statusEl.dataset.info : '');
+}
+
+// ---- предпросмотр структуры кадра (до «Передать») ----
+const BORDER = 2, MARGIN = 1, FINDER = 7, HEADER_BITS = 108;
+
+function finderBlack(x, y) {
+  return x === 0 || x === FINDER - 1 || y === 0 || y === FINDER - 1 ||
+         (x >= 2 && x <= 4 && y >= 2 && y <= 4);
+}
+
+function drawCells(w, h, colorAt) {
+  const cell = parseInt(document.getElementById('cellPx').value, 10) || 10;
+  canvas.width = w * cell;
+  canvas.height = h * cell;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      ctx.fillStyle = colorAt(x, y);
+      ctx.fillRect(x * cell, y * cell, cell, cell);
+    }
+  }
+}
+
+function renderPreview() {
+  const w = parseInt(document.getElementById('gridW').value, 10);
+  const h = parseInt(document.getElementById('gridH').value, 10);
+  const n = parseInt(document.getElementById('paletteN').value, 10);
+  if (!(w >= 16 && w <= 512 && h >= 16 && h <= 512)) return;
+  const innerW = w - 2 * (BORDER + MARGIN);
+  const innerH = h - 2 * (BORDER + MARGIN);
+  const headerRows = Math.ceil(HEADER_BITS / innerW);
+  const headerY0 = BORDER + MARGIN + FINDER;
+  drawCells(w, h, (x, y) => {
+    const inBorder = x < BORDER || y < BORDER || x >= w - BORDER || y >= h - BORDER;
+    if (inBorder) return '#f0f';                                  // рамка
+    const ix = x - BORDER - MARGIN, iy = y - BORDER - MARGIN;     // внутр. коорд.
+    let fx = -1, fy = -1;                                         // локальные коорд. в маркере
+    if (ix < FINDER && iy < FINDER) { fx = ix; fy = iy; }                       // верх-лево
+    else if (ix >= innerW - FINDER && iy < FINDER) { fx = ix - (innerW - FINDER); fy = iy; } // верх-право
+    else if (ix < FINDER && iy >= innerH - FINDER) { fx = ix; fy = iy - (innerH - FINDER); } // низ-лево
+    if (fx >= 0) return finderBlack(fx, fy) ? '#000' : '#fff';
+    const inHeader = y >= headerY0 && y < headerY0 + headerRows;
+    if (inHeader) return '#cde';                                  // зона заголовка (ч/б при передаче)
+    return paletteColor(n, (ix + iy) % n);                        // payload: образец палитры
+  });
+  statusEl.textContent = 'предпросмотр кадра — нажми «Передать»';
+}
+
+function schedule() {
+  clearTimeout(timer);
+  if (!playing || !frames.length) return;
+  timer = setTimeout(() => {
+    current = (current + 1) % frames.length;
+    if (current === 0 && !document.getElementById('loop').checked) {
+      playing = false;
+      document.getElementById('btnPlay').textContent = 'Продолжить';
+      return;
+    }
+    showFrame(current);
+    schedule();
+  }, parseInt(document.getElementById('delay').value, 10) || 500);
+}
+
+function togglePlay() {
+  playing = !playing;
+  document.getElementById('btnPlay').textContent = playing ? 'Пауза' : 'Продолжить';
+  if (playing) { showFrame(current); schedule(); }
+}
+
+function goFullscreen() {
+  document.getElementById('stage').requestFullscreen();
+}
+
+document.getElementById('delay').addEventListener('change', schedule);
+
+async function updateCapacity() {
+  const w = parseInt(document.getElementById('gridW').value, 10);
+  const h = parseInt(document.getElementById('gridH').value, 10);
+  const el = document.getElementById('capacityInfo');
+  if (!(w >= 16 && w <= 512 && h >= 16 && h <= 512)) {
+    el.textContent = 'сетка: 16..512 по каждой стороне';
+    return;
+  }
+  try {
+    const n = document.getElementById('paletteN').value;
+    const r = await fetch(`/api/capacity?w=${w}&h=${h}&palette=${n}`);
+    const d = await r.json();
+    el.textContent = r.ok ? `≈ ${d.bytes_per_frame} байт/кадр` : d.detail;
+  } catch { el.textContent = ''; }
+}
+function clearAll() {
+  clearTimeout(timer);
+  frames = [];
+  current = 0;
+  playing = true;
+  statusEl.dataset.info = '';
+  document.getElementById('btnPlay').disabled = true;
+  document.getElementById('btnFull').disabled = true;
+  document.getElementById('btnPlay').textContent = 'Пауза';
+  renderPreview();
+}
+
+for (const id of ['gridW', 'gridH']) {
+  document.getElementById(id).addEventListener('input', () => {
+    updateCapacity();
+    if (frames.length && playing) {
+      statusEl.dataset.info = 'сетка изменилась — нажми «Передать», чтобы перекодировать';
+      showFrame(current);
+    } else {
+      statusEl.dataset.info = '';
+      renderPreview();
+    }
+  });
+}
+document.getElementById('paletteN').addEventListener('change', () => {
+  updateCapacity();
+  if (frames.length && playing) {
+    statusEl.dataset.info = 'палитра изменилась — нажми «Передать», чтобы перекодировать';
+    showFrame(current);  // кадры рендерятся своей (сохранённой) палитрой
+  } else {
+    statusEl.dataset.info = '';
+    renderPreview();
+  }
+});
+document.getElementById('cellPx').addEventListener('input', () => {
+  if (frames.length && playing) showFrame(current);
+  else renderPreview();
+});
+updateCapacity();
+renderPreview();
+</script>
+</body>
+</html>

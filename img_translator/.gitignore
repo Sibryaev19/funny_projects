@@ -1,0 +1,14 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+
+# --- Личные настройки и данные ---
+.env
+received/
+.for_agent/
+
+# --- Системное ---
+.DS_Store
+Thumbs.db
+.idea/
