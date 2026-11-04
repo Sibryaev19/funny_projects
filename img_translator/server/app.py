@@ -5,6 +5,9 @@ from __future__ import annotations
 import io
 import os
 import queue as _queue
+import secrets
+import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -17,8 +20,10 @@ from protocol.encoder import (
     VERSION,
     PALETTES,
     PALETTE_ORDER,
-    encode_frames,
+    build_frame,
     frame_capacity,
+    frame_count,
+    payload_chunk_size,
 )
 from protocol.envconfig import parse_env as _parse_env
 
@@ -26,7 +31,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_GRID = (128, 96)
 DEFAULT_PALETTE = 2
-MAX_BYTES = 20 * 1024 * 1024  # щит на случай случайного выбора огромной папки
+DEFAULT_MAX_MB = 2048  # щит на случай случайного выбора огромной папки
+SESSION_TTL = 24 * 3600  # сессии передачи живут на диске сутки
 
 # Файл с дефолтами интерфейса (KEY=VALUE). Смена имени — только здесь.
 ENV_FILE = ".env"
@@ -111,6 +117,33 @@ class TransmitRequest(BaseModel):
     palette: int | None = None      # число цветов: 2/4/8/16
 
 
+# --- сессии передачи: zip на диске, кадры кодируются по запросу ---
+# Потолок по объёму снимается: браузер держит в памяти только пару
+# кадров, сервер — один кодируемый кадр и кусок исходных данных.
+_sessions: dict[str, dict] = {}
+# sid -> {path, zip_size, total, cap, grid, palette, created}
+
+
+def _cleanup_sessions() -> None:
+    """Выкидывает протухшие сессии и стирает их файлы."""
+    now = time.time()
+    dead = [sid for sid, s in _sessions.items()
+            if now - s["created"] > SESSION_TTL or not s["path"].exists()]
+    for sid in dead:
+        try:
+            _sessions[sid]["path"].unlink(missing_ok=True)
+        except OSError:
+            pass
+        del _sessions[sid]
+
+
+def _session(sid: str) -> dict:
+    s = _sessions.get(sid)
+    if s is None or time.time() - s["created"] > SESSION_TTL or not s["path"].exists():
+        raise HTTPException(410, "сессия передачи не найдена или протухла — нажми «Передать» заново")
+    return s
+
+
 def build_zip(paths: list[str]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -177,6 +210,18 @@ def resolve_palette(palette: int | None) -> int:
     return palette
 
 
+def max_zip_bytes() -> int:
+    """Лимит архива из .env (MAX_ZIP_MB, МБ), иначе DEFAULT_MAX_MB."""
+    raw = _parse_env(PROJECT_ROOT / ENV_FILE)
+    try:
+        mb = int(raw.get("MAX_ZIP_MB", ""))
+        if mb > 0:
+            return mb * 1024 * 1024
+    except ValueError:
+        pass
+    return DEFAULT_MAX_MB * 1024 * 1024
+
+
 @app.post("/api/transmit")
 def transmit(req: TransmitRequest) -> dict:
     if not req.paths:
@@ -184,16 +229,47 @@ def transmit(req: TransmitRequest) -> dict:
     w, h = resolve_grid(req.grid)
     palette = resolve_palette(req.palette)
     data = build_zip(req.paths)
-    if len(data) > MAX_BYTES:
-        raise HTTPException(400, f"архив слишком большой: {len(data)} байт")
-    frames = encode_frames(data, w, h, palette)
+    limit = max_zip_bytes()
+    if len(data) > limit:
+        raise HTTPException(400, f"архив слишком большой: {len(data)} байт (лимит {limit // (1024 * 1024)} МБ)")
+    total = frame_count(len(data), w, h, palette)
+    if total > 0xFFFF:
+        raise HTTPException(400, f"нужно {total} кадров (поле заголовка — 16 бит): увеличьте сетку")
+
+    fd, tmp = tempfile.mkstemp(prefix="imgtr_session_", suffix=".zip")
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    sid = secrets.token_hex(8)
+    _cleanup_sessions()
+    _sessions[sid] = {
+        "path": Path(tmp),
+        "zip_size": len(data),
+        "total": total,
+        "cap": payload_chunk_size(w, h, palette),
+        "grid": (w, h),
+        "palette": palette,
+        "created": time.time(),
+    }
     return {
         "version": VERSION,
         "grid": [w, h],
         "palette": palette,
         "zip_size": len(data),
-        "frames": [f.as_dict() for f in frames],
+        "total": total,
+        "sid": sid,
     }
+
+
+@app.get("/api/frame")
+def frame(sid: str = Query(...), i: int = Query(...)) -> dict:
+    """Один кадр передачи: кодируется на лету из zip-файла сессии."""
+    s = _session(sid)
+    if not 0 <= i < s["total"]:
+        raise HTTPException(400, f"индекс кадра {i} вне диапазона 0..{s['total'] - 1}")
+    with s["path"].open("rb") as f:
+        f.seek(i * s["cap"])
+        chunk = f.read(s["cap"])
+    return build_frame(chunk, i, s["total"], *s["grid"], s["palette"]).as_dict()
 
 
 @app.get("/api/capacity")

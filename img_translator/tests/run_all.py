@@ -18,6 +18,7 @@ TESTS = [
     "test_e2e_receiver.py",     # цикл приёма без экрана (FakeCapture)
     "test_picker_process.py",   # tkinter в отдельном процессе
     "test_env_config.py",       # дефолты интерфейса из .env
+    "test_streaming.py",        # стриминг кадров: сессии на диске + /api/frame
 ]
 
 def main() -> int:

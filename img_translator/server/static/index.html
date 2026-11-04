@@ -53,12 +53,14 @@
 <pre id="status">Выбери файлы или папки и нажми «Передать».</pre>
 
 <script>
-let frames = [];
+let session = null;     // мета передачи с сервера: {sid, total, zip_size, palette, grid}
+let frameCache = new Map();  // index -> rows (пара кадров, не вся передача)
+let pending = new Map();     // index -> Promise<rows>
 let current = 0;
 let playing = true;
 let timer = null;
 let PALETTES = {};      // {2: [[r,g,b],...], ...} с сервера
-let curPalette = 2;     // палитра, которой закодированы frames
+let curPalette = 2;     // палитра, которой закодированы кадры
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -133,12 +135,14 @@ async function transmit() {
                   parseInt(document.getElementById('gridH').value, 10)];
     const palette = parseInt(document.getElementById('paletteN').value, 10);
     const data = await post('/api/transmit', {paths: selectedPaths, grid, palette});
-    frames = data.frames;
+    session = data;
+    frameCache.clear();
+    pending.clear();
     curPalette = data.palette;
     current = 0;
     document.getElementById('btnPlay').disabled = false;
     document.getElementById('btnFull').disabled = false;
-    const info = `архив: ${data.zip_size} байт, кадров: ${frames.length}, сетка: ${data.grid[0]}x${data.grid[1]}, цветов: ${data.palette}`;
+    const info = `архив: ${data.zip_size} байт, кадров: ${data.total}, сетка: ${data.grid[0]}x${data.grid[1]}, цветов: ${data.palette}`;
     statusEl.dataset.info = info;
     statusEl.textContent = info;
     playing = true;
@@ -148,16 +152,50 @@ async function transmit() {
   } catch (e) { statusEl.textContent = 'Ошибка передачи: ' + e.message; }
 }
 
-function showFrame(i) {
-  const rows = frames[i].rows;
+// кадры тянем по одному: сервер хранит zip на диске и кодирует на лету,
+// страница держит в памяти только пару кадров вокруг текущего
+async function fetchFrame(i) {
+  if (frameCache.has(i)) return frameCache.get(i);
+  if (!pending.has(i)) {
+    pending.set(i, fetch(`/api/frame?sid=${session.sid}&i=${i}`)
+      .then(async r => {
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+        return r.json();
+      })
+      .then(d => {
+        frameCache.set(i, d.rows);
+        pending.delete(i);
+        if (frameCache.size > 8) frameCache.delete(frameCache.keys().next().value);
+        return d.rows;
+      })
+      .catch(e => { pending.delete(i); throw e; }));
+  }
+  return pending.get(i);
+}
+
+function prefetch(i) {
+  if (i >= 0 && i < session.total) fetchFrame(i).catch(() => {});
+}
+
+async function showFrame(i) {
+  let rows;
+  try {
+    rows = await fetchFrame(i);
+  } catch (e) {
+    statusEl.textContent = `Ошибка кадра ${i + 1}: ${e.message}`;
+    return;
+  }
   const h = rows.length, w = rows[0].length;
   drawCells(w, h, (x, y) => {
     const ch = rows[y][x];
     if (ch === 'M') return '#f0f';
     return paletteColor(curPalette, parseInt(ch, 16));
   });
+  // за паузу упреждающе тянем следующие кадры
+  prefetch(i + 1);
+  prefetch(i + 2);
   statusEl.textContent =
-    `кадр ${frames[i].index + 1} / ${frames[i].total}` +
+    `кадр ${i + 1} / ${session.total}` +
     (statusEl.dataset.info ? '\n' + statusEl.dataset.info : '');
 }
 
@@ -208,9 +246,9 @@ function renderPreview() {
 
 function schedule() {
   clearTimeout(timer);
-  if (!playing || !frames.length) return;
+  if (!playing || !session) return;
   timer = setTimeout(() => {
-    current = (current + 1) % frames.length;
+    current = (current + 1) % session.total;
     if (current === 0 && !document.getElementById('loop').checked) {
       playing = false;
       document.getElementById('btnPlay').textContent = 'Продолжить';
@@ -250,7 +288,9 @@ async function updateCapacity() {
 }
 function clearAll() {
   clearTimeout(timer);
-  frames = [];
+  session = null;
+  frameCache.clear();
+  pending.clear();
   current = 0;
   playing = true;
   statusEl.dataset.info = '';
@@ -263,7 +303,7 @@ function clearAll() {
 for (const id of ['gridW', 'gridH']) {
   document.getElementById(id).addEventListener('input', () => {
     updateCapacity();
-    if (frames.length && playing) {
+    if (session && playing) {
       statusEl.dataset.info = 'сетка изменилась — нажми «Передать», чтобы перекодировать';
       showFrame(current);
     } else {
@@ -274,7 +314,7 @@ for (const id of ['gridW', 'gridH']) {
 }
 document.getElementById('paletteN').addEventListener('change', () => {
   updateCapacity();
-  if (frames.length && playing) {
+  if (session && playing) {
     statusEl.dataset.info = 'палитра изменилась — нажми «Передать», чтобы перекодировать';
     showFrame(current);  // кадры рендерятся своей (сохранённой) палитрой
   } else {
@@ -283,7 +323,7 @@ document.getElementById('paletteN').addEventListener('change', () => {
   }
 });
 document.getElementById('cellPx').addEventListener('input', () => {
-  if (frames.length && playing) showFrame(current);
+  if (session && playing) showFrame(current);
   else renderPreview();
 });
 updateCapacity();

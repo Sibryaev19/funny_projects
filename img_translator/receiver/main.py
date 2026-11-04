@@ -169,8 +169,8 @@ def receive(
     """
     w, h = grid
     period = 1.0 / max(fps, 0.1)
-    grids: dict[int, list] = {}
-    total = None
+    parts: dict[int, bytes] = {}  # декодированные payload-куски, не сетки:
+    total = None                  # сетка ~1 МБ/кадр съела бы ~18 ГБ на 1 ГБ данных
     misses = 0
     start = time.time()
     locked: tuple[int, int] | None = (w, h) if w is not None else None
@@ -202,26 +202,25 @@ def receive(
                     if on_calibrated:
                         on_calibrated(palette_cache)
                 idx, total = meta["index"], meta["total"]
-                if idx not in grids:
-                    E.decode_frame(meta["grid"])  # CRC кадра
-                    grids[idx] = meta["grid"]
+                if idx not in parts:
+                    parts[idx] = E.decode_frame(meta["grid"])  # CRC кадра
                     if on_progress:
-                        on_progress(len(grids), total, "")
+                        on_progress(len(parts), total, "")
                     misses = 0
             except (VisionError, ValueError) as e:
                 misses += 1
                 if on_progress and misses % max(1, int(fps)) == 0:
-                    on_progress(len(grids), total or 0, str(e))
+                    on_progress(len(parts), total or 0, str(e))
                 if debug_dir is not None and misses <= 3:
                     _dump_debug(debug_dir, img, w, h, palette, e)
-            if total is not None and len(grids) >= total:
-                return E.decode_frames(list(grids.values()))
+            if total is not None and len(parts) >= total:
+                return b"".join(parts[i] for i in range(total))
             time.sleep(max(0.0, period - (time.time() - t0)))
     finally:
         if capture is not None and hasattr(capture, "close"):
             capture.close()
     raise TimeoutError(
-        f"за {timeout:.0f}с собрано {len(grids)} из {total or '?'} кадров"
+        f"за {timeout:.0f}с собрано {len(parts)} из {total or '?'} кадров"
     )
 
 def unpack(data: bytes, out_arg: str | None) -> Path:

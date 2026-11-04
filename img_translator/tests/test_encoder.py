@@ -104,4 +104,44 @@ for bad in [(10, 10), (30, 20)]:
         pass
 
 assert VERSION == 3
+
+# --- потоковое кодирование: encode_at/build_frame ≡ encode_frames ---
+# и чанкование, безопасное для 16-битного поля длины (сетки >64 КБ/кадр)
+from protocol.encoder import (
+    build_frame,
+    encode_at,
+    frame_count,
+    payload_chunk_size,
+)
+
+random.seed(7)
+for (w, h, p) in [(128, 96, 2), (64, 48, 4), (500, 250, 16), (512, 384, 16), (512, 512, 16)]:
+    cap = payload_chunk_size(w, h, p)
+    data = random.randbytes(cap * 3 + 123)   # 4 кадра, последний — обрезан
+    frames = encode_frames(data, w, h, p)
+    assert frame_count(len(data), w, h, p) == len(frames) == 4
+    assert all(f.payload_len <= 0xFFFF for f in frames), "payload длиннее 16-битного поля"
+    for i, f in enumerate(frames):
+        assert encode_at(data, i, w, h, p).as_dict() == f.as_dict()
+        assert build_frame(f.payload_len and data[i * cap:(i + 1) * cap] or b"",
+                           i, len(frames), w, h, p).as_dict() == f.as_dict()
+    # сборка из кусков (как теперь работает приёмник) == decode_frames
+    parts = [decode_frame(f.grid) for f in frames]
+    assert b"".join(parts) == decode_frames([f.grid for f in frames]) == data
+    print(f"ok поток: {w}x{h}x{p}, {len(frames)} кадров, чанк {cap}")
+
+# сетки, где ёмкость кадра > 0xFFFF: раньше длина молча обрезалась, теперь режем данные
+assert frame_capacity(512, 384, 16) > 0xFFFF
+assert payload_chunk_size(512, 384, 16) == 0xFFFF
+# а при ёмкости <= 0xFFFF чанк не меняется (обратная совместимость настроек)
+assert payload_chunk_size(500, 250, 16) == frame_capacity(500, 250, 16)
+# пустые данные — ровно один кадр, в encode_at и encode_frames одинаково
+assert frame_count(0, 128, 96, 2) == 1
+assert encode_at(b"", 0, 128, 96, 2).as_dict() == encode_frames(b"", 128, 96, 2)[0].as_dict()
+try:
+    encode_at(b"abc", 5, 128, 96, 2)
+    raise AssertionError("индекс вне диапазона не отклонён")
+except ValueError:
+    pass
+
 print("все тесты пройдены")

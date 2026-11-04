@@ -218,72 +218,117 @@ def _layout(w: int, h: int) -> tuple[set, list, list, list]:
     return payload, header_cells, finders, strip
 
 
+def payload_chunk_size(w: int, h: int, palette: int) -> int:
+    """Сколько байт payload максимум кладём в один кадр.
+
+    Не больше ёмкости кадра и не больше 0xFFFF (16-битное поле длины
+    в заголовке): для больших сеток данные режутся более мелкими
+    кусками, а не обрезаются полем длины."""
+    validate_palette(palette)
+    validate_grid(w, h)
+    return min(frame_capacity(w, h, palette), 0xFFFF)
+
+
+def frame_count(data_len: int, w: int, h: int, palette: int) -> int:
+    """Число кадров для данных такой длины (пустые данные — один кадр)."""
+    cap = payload_chunk_size(w, h, palette)
+    return max(1, -(-data_len // cap))
+
+
+def build_frame(
+    chunk: bytes,
+    index: int,
+    total: int,
+    w: int = 128,
+    h: int = 96,
+    palette: int = 2,
+) -> Frame:
+    """Кодирует ОДИН кадр из готового куска payload.
+
+    Чанкование — по payload_chunk_size(); для потоковой отдачи кадров
+    сервер режет данные сам и вызывает эту функцию, не держа все
+    кадры в памяти. index/total — для полей заголовка."""
+    validate_palette(palette)
+    validate_grid(w, h)
+    payload_cells, header_cells, finders, strip = _layout(w, h)
+    k = palette.bit_length() - 1
+    palette_id = PALETTE_ORDER.index(palette)
+
+    grid = [[WHITE] * w for _ in range(h)]
+    # маджента-рамка
+    for x in range(w):
+        for y in range(h):
+            if x < BORDER or y < BORDER or x >= w - BORDER or y >= h - BORDER:
+                grid[y][x] = MAGENTA
+    # маркеры
+    for cx, cy in finders:
+        for dy in range(FINDER):
+            for dx in range(FINDER):
+                grid[cy + dy][cx + dx] = _FINDER_PATTERN[dy][dx]
+
+    crc = zlib.crc32(chunk) & 0xFFFFFFFF
+    header = (
+        _bits(VERSION, F_VERSION)
+        + _bits(w, F_W)
+        + _bits(h, F_H)
+        + _bits(palette_id, F_PALETTE)
+        + _bits(index, F_INDEX)
+        + _bits(total, F_TOTAL)
+        + _bits(len(chunk), F_LENGTH)
+        + _bits(crc, F_CRC)
+    )
+    for (x, y), bit in zip(header_cells, header):
+        grid[y][x] = bit
+
+    # payload: биты -> группы по k -> индексы палитры
+    bitstream: list[int] = []
+    for byte in chunk:
+        bitstream.extend(_bits(byte, 8))
+    values: list[int] = []
+    for i in range(0, len(bitstream), k):
+        group = bitstream[i : i + k]
+        values.append(_to_int(group + [0] * (k - len(group))))
+    values.extend([WHITE] * (len(payload_cells) - len(values)))
+    for (x, y), v in zip(payload_cells, values):
+        grid[y][x] = v
+    # полоса калибровки: перебор индексов палитры по модулю
+    for p, (x, y) in enumerate(strip):
+        grid[y][x] = p % palette
+
+    return Frame(index, total, len(chunk), crc, palette, grid)
+
+
+def encode_at(
+    data: bytes,
+    index: int,
+    w: int = 128,
+    h: int = 96,
+    palette: int = 2,
+) -> Frame:
+    """Кодирует кадр с номером index из данных (потоковый аналог
+    encode_frames: кадры получаются те же, но по одному)."""
+    total = frame_count(len(data), w, h, palette)
+    if not 0 <= index < total:
+        raise ValueError(f"индекс кадра {index} вне диапазона 0..{total - 1}")
+    cap = payload_chunk_size(w, h, palette)
+    chunk = data[index * cap : (index + 1) * cap] if data else b""
+    return build_frame(chunk, index, total, w, h, palette)
+
+
 def encode_frames(
     data: bytes,
     w: int = 128,
     h: int = 96,
     palette: int = 2,
 ) -> list[Frame]:
-    """Режет данные на кадры заданной сетки и палитры."""
-    validate_palette(palette)
-    validate_grid(w, h)
-    cap = frame_capacity(w, h, palette)
-    if cap <= 0:
-        raise ValueError("сетка слишком мала для полезной нагрузки")
+    """Режет данные на кадры заданной сетки и палитры (все разом)."""
+    cap = payload_chunk_size(w, h, palette)
     chunks = [data[i : i + cap] for i in range(0, len(data), cap)] or [b""]
     total = len(chunks)
     if total > 0xFFFF:
         raise ValueError("слишком много кадров: уменьшите данные или увеличьте сетку")
-
-    payload_cells, header_cells, finders, strip = _layout(w, h)
-    k = palette.bit_length() - 1
-    palette_id = PALETTE_ORDER.index(palette)
-
-    frames = []
-    for idx, chunk in enumerate(chunks):
-        grid = [[WHITE] * w for _ in range(h)]
-        # маджента-рамка
-        for x in range(w):
-            for y in range(h):
-                if x < BORDER or y < BORDER or x >= w - BORDER or y >= h - BORDER:
-                    grid[y][x] = MAGENTA
-        # маркеры
-        for cx, cy in finders:
-            for dy in range(FINDER):
-                for dx in range(FINDER):
-                    grid[cy + dy][cx + dx] = _FINDER_PATTERN[dy][dx]
-
-        crc = zlib.crc32(chunk) & 0xFFFFFFFF
-        header = (
-            _bits(VERSION, F_VERSION)
-            + _bits(w, F_W)
-            + _bits(h, F_H)
-            + _bits(palette_id, F_PALETTE)
-            + _bits(idx, F_INDEX)
-            + _bits(total, F_TOTAL)
-            + _bits(len(chunk), F_LENGTH)
-            + _bits(crc, F_CRC)
-        )
-        for (x, y), bit in zip(header_cells, header):
-            grid[y][x] = bit
-
-        # payload: биты -> группы по k -> индексы палитры
-        bitstream: list[int] = []
-        for byte in chunk:
-            bitstream.extend(_bits(byte, 8))
-        values: list[int] = []
-        for i in range(0, len(bitstream), k):
-            group = bitstream[i : i + k]
-            values.append(_to_int(group + [0] * (k - len(group))))
-        values.extend([WHITE] * (len(payload_cells) - len(values)))
-        for (x, y), v in zip(payload_cells, values):
-            grid[y][x] = v
-        # полоса калибровки: перебор индексов палитры по модулю
-        for p, (x, y) in enumerate(strip):
-            grid[y][x] = p % palette
-
-        frames.append(Frame(idx, total, len(chunk), crc, palette, grid))
-    return frames
+    return [build_frame(chunk, idx, total, w, h, palette)
+            for idx, chunk in enumerate(chunks)]
 
 
 # --- приёмная сторона (круговые тесты и будущий режим 2) ---
