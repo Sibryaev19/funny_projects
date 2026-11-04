@@ -11,14 +11,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from protocol import encoder as E
 from protocol.vision import VisionError, read_frame
 
-def render(frame, palette: int, cell: float, off: tuple[int, int], noise: int, rng) -> np.ndarray:
-    """Кадр -> «скриншот»: шумный пёстрый фон, кадр в off, ячейка cell px."""
+def render(frame, palette: int, cell: float, off: tuple[int, int], noise: int, rng,
+           shift=None) -> np.ndarray:
+    """Кадр -> «скриншот»: шумный пёстрый фон, кадр в off, ячейка cell px.
+
+    shift: функция RGB->RGB — имитация искажения цветопередачи экрана
+    (применяется к палитре; маджента-рамка не трогается).
+    """
     h, w = len(frame.grid), len(frame.grid[0])
     shape = (off[0] + int(h * cell) + 60, off[1] + int(w * cell) + 60)
     img = rng.integers(0, 255, shape + (3,), dtype=np.uint8)
     # фон из крупных пёстрых блоков — «чужой интерфейс»
     img = img.repeat(24, 0).repeat(24, 1)[: shape[0], : shape[1]]
-    pal = E.PALETTES[palette]
+    pal = [tuple(shift(c)) if shift else c for c in E.PALETTES[palette]]
     colors = np.array(list(pal) + [(255, 0, 255)], dtype=np.uint8)
     g = np.array(frame.grid, dtype=np.int64)
     g = np.where(g == E.MAGENTA, len(pal), g)  # рамка -> последний цвет
@@ -40,8 +45,16 @@ def try_stream(data: bytes, w, h, palette, cell, noise, seed=1):
     for i, f in enumerate(frames):
         off = (30 + i * 17, 40 + i * 23)
         img = render(f, palette, cell, off, noise, rng)
+        # явная конфигурация (override-сверка)
         meta = read_frame(img, w, h, palette)
         assert meta["index"] == f.index and meta["total"] == f.total
+        # автоопределение: сетка и палитра из самого кадра
+        meta_auto = read_frame(img)
+        assert meta_auto["config"]["w"] == w, meta_auto["config"]
+        assert meta_auto["config"]["h"] == h, meta_auto["config"]
+        assert meta_auto["config"]["palette"] == palette, meta_auto["config"]
+        assert meta_auto["index"] == f.index
+        E.decode_frame(meta_auto["grid"])  # авто-сетка проходит CRC
         grids.append(meta["grid"])
     restored = E.decode_frames(grids)
     assert restored == data, f"{w}x{h} {palette}цв cell={cell} noise={noise}: байты не совпали"
@@ -60,6 +73,23 @@ def main() -> None:
 
     # нецелый pitch (масштаб окна «как попало»)
     try_stream(b"fractional pitch", 64, 48, 4, 6.7, 10)
+
+    # искажённая цветопередача (экран глу́шит синий) — калибровка спасает CRC
+    random.seed(11)
+    data = bytes(random.randrange(256) for _ in range(3000))
+    f = E.encode_frames(data, 128, 96, 16)[0]
+    img = render(f, 16, 7.0, (30, 40), 6, np.random.default_rng(11),
+                 shift=lambda c: (c[0], c[1], int(c[2] * 0.55)))
+    meta_bad = read_frame(img, 128, 96, 16, allow_calibrate=False)
+    try:
+        E.decode_frame(meta_bad["grid"])
+        raise AssertionError("сдвинутые цвета не сломали CRC без калибровки")
+    except ValueError:
+        pass
+    meta_cal = read_frame(img, 128, 96, 16)
+    assert meta_cal.get("calibrated_palette"), "калибровка не сработала"
+    assert E.decode_frame(meta_cal["grid"]) == data, "калибровка не восстановила данные"
+    print("ok: авто-калибровка спасла сдвинутую цветопередачу")
 
     # пустая картинка -> внятная ошибка
     blank = np.full((400, 500, 3), 128, dtype=np.uint8)

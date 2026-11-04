@@ -107,29 +107,43 @@ def main() -> None:
             import shutil as _shutil
             _shutil.rmtree(Path(".for_agent/test/env_out"), ignore_errors=True)
 
-        # 7. приёмник: apply_env_defaults подхватывает .env, CLI побеждает
+        # 7. приёмник: apply_env_defaults — только fps (сетка/палитра — auto)
         import receiver.main as receiver_main
 
         tmp_recv = TMP_ENV.with_name(".env_test_recv")
-        tmp_recv.write_text(
-            "GRID_W=200\nGRID_H=150\nCOLORS=8\nFPS=6\n", encoding="utf-8"
-        )
+        tmp_recv.write_text("FPS=6\nGRID_W=200\nCOLORS=8\n", encoding="utf-8")
         envconfig.ENV_PATH = tmp_recv
         try:
             args = receiver_main.parse_args([])
             receiver_main.apply_env_defaults(args)
-            assert args.grid == [200, 150] and args.colors == 8 and args.fps == 6.0, args
-            args = receiver_main.parse_args(["--grid", "64", "48", "--colors", "4", "--fps", "3"])
+            assert args.fps == 6.0 and args.grid is None and args.colors is None, args
+            args = receiver_main.parse_args(["--fps", "3"])
             receiver_main.apply_env_defaults(args)
-            assert args.grid == [64, 48] and args.colors == 4 and args.fps == 3.0, args
-            tmp_recv.write_text("GRID_W=abc\nCOLORS=3\nFPS=много\n", encoding="utf-8")
+            assert args.fps == 3.0, args
+            tmp_recv.write_text("FPS=много\n", encoding="utf-8")
             args = receiver_main.parse_args([])
             receiver_main.apply_env_defaults(args)
-            assert args.grid == [128, 96] and args.colors == 16 and args.fps == 4.0, args
-            print("ok: apply_env_defaults (env, CLI, кривые значения)")
+            assert args.fps == 4.0, args
+            print("ok: apply_env_defaults (fps из .env, CLI побеждает, кривое → 4.0)")
         finally:
             envconfig.ENV_PATH = envconfig.PROJECT_ROOT / ".env"
             tmp_recv.unlink(missing_ok=True)
+
+        # 8. кэш калиброванной палитры: set_env_key + формат CAL_PALETTE
+        cal = [(i * 16 % 256, i * 8 % 256, i * 4 % 256) for i in range(16)]
+        tmp_cal = TMP_ENV.with_name(".env_test_cal")
+        tmp_cal.write_text("GRID_W=192\n", encoding="utf-8")
+        envconfig.set_env_key(tmp_cal, "CAL_PALETTE",
+                              ";".join(f"({r},{g},{b})" for r, g, b in cal))
+        loaded = envconfig.load_env(tmp_cal)
+        assert loaded["GRID_W"] == "192", loaded  # остальное сохранилось
+        parsed = [tuple(int(x) for x in p.strip("()").split(","))
+                  for p in loaded["CAL_PALETTE"].split(";")]
+        assert list(parsed) == cal, parsed
+        envconfig.set_env_key(tmp_cal, "CAL_PALETTE", "(1,2,3)")  # замена, не дубль
+        assert envconfig.load_env(tmp_cal)["CAL_PALETTE"] == "(1,2,3)"
+        tmp_cal.unlink(missing_ok=True)
+        print("ok: set_env_key / CAL_PALETTE (запись, замена, формат)")
 
         print("ВСЕ ТЕСТЫ ENV-ДЕФОЛТОВ ПРОЙДЕНЫ")
     finally:

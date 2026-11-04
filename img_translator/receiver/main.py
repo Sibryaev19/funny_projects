@@ -21,7 +21,8 @@ from pathlib import Path
 import numpy as np
 
 from protocol import encoder as E
-from protocol.envconfig import load_env
+from protocol import envconfig
+from protocol.envconfig import load_env, set_env_key
 from protocol.vision import VisionError, read_frame, find_frame_region
 from receiver.capture import open_capture
 from receiver.snip import select_region
@@ -35,9 +36,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Приёмник визуального канала img_translator",
     )
     p.add_argument("--grid", nargs=2, type=int, default=None, metavar=("W", "H"),
-                   help="сетка кадра в ячейках; по умолчанию GRID_W/GRID_H из .env, иначе 128 96")
+                   help="ожидаемая сетка кадра для сверки; по умолчанию определяется автоматически")
     p.add_argument("--colors", type=int, default=None, choices=E.PALETTE_ORDER,
-                   help="число цветов палитры; по умолчанию COLORS из .env, иначе 16")
+                   help="ожидаемое число цветов для сверки; по умолчанию берётся из заголовка кадра")
     p.add_argument("--fps", type=float, default=None,
                    help="снимков в секунду; по умолчанию FPS из .env, иначе 4")
     p.add_argument("--capture", choices=["auto", "mss", "wayland"], default="auto",
@@ -55,20 +56,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def apply_env_defaults(args: argparse.Namespace) -> None:
-    """Заполняет незаданные grid/colors/fps из .env (GRID_W/H, COLORS, FPS)."""
+    """Заполняет незаданный fps из .env (ключ FPS).
+
+    Сетка и палитра приёмником не запрашиваются: они определяются
+    автоматически из кадра (рамка + заголовок) либо задаются флагами.
+    """
     raw = load_env()
-
-    def _int(key: str, default: int) -> int:
-        try:
-            return int(raw[key])
-        except (KeyError, ValueError):
-            return default
-
-    if args.grid is None:
-        args.grid = [_int("GRID_W", 128), _int("GRID_H", 96)]
-    if args.colors is None:
-        colors = _int("COLORS", 16)
-        args.colors = colors if colors in E.PALETTE_ORDER else 16
     if args.fps is None:
         try:
             args.fps = float(raw["FPS"])
@@ -94,17 +87,42 @@ def grab_rgb(sct, region: tuple[int, int, int, int]) -> np.ndarray:
     return np.ascontiguousarray(bgr[:, :, ::-1])
 
 
-def _dump_debug(debug_dir: Path, img: np.ndarray, w: int, h: int, palette: int, err: Exception) -> None:
+def _load_cal_palette() -> list[tuple[int, int, int]] | None:
+    """Кэш измеренной палитры из .env (CAL_PALETTE, 16 записей)."""
+    raw = load_env().get("CAL_PALETTE", "").strip()
+    if not raw:
+        return None
+    try:
+        pal = [tuple(int(x) for x in part.strip("()").split(",")) for part in raw.split(";")]
+    except ValueError:
+        return None
+    return pal if len(pal) == 16 else None
+
+
+def _save_cal_palette(pal: list[tuple[int, int, int]]) -> None:
+    val = ";".join(f"({r},{g},{b})" for r, g, b in pal)
+    set_env_key(envconfig.ENV_PATH, "CAL_PALETTE", val)
+    print("калиброванная палитра сохранена в .env (CAL_PALETTE)")
+
+
+def _dump_debug(debug_dir: Path, img: np.ndarray, w: int | None, h: int | None,
+                palette: int | None, err: Exception) -> None:
     """Сохранить снимок и статистику путаницы цветов для разбора."""
     import PIL.Image
 
-    from protocol.vision import _cell_centers, _sample_cells, magenta_mask, find_frame_bbox
+    from protocol.vision import (
+        _cell_centers, _sample_cells, detect_config, find_frame_bbox, magenta_mask,
+    )
 
     debug_dir.mkdir(parents=True, exist_ok=True)
     n = len(list(debug_dir.glob("fail*.png"))) + 1
     PIL.Image.fromarray(img).save(debug_dir / f"fail{n}.png")
     stats: dict = {}
     try:
+        if w is None or h is None:
+            mask = magenta_mask(img)
+            cfg = detect_config(img, mask, find_frame_bbox(mask))
+            w, h, palette = cfg["w"], cfg["h"], cfg["meta"]["palette"]
         x0, y0, bw, bh = find_frame_bbox(magenta_mask(img))
         xs = _cell_centers(x0, w, bw / w, img.shape[1])
         ys = _cell_centers(y0, h, bh / h, img.shape[0])
@@ -128,17 +146,24 @@ def _dump_debug(debug_dir: Path, img: np.ndarray, w: int, h: int, palette: int, 
 
 def receive(
     region: tuple[int, int, int, int],
-    grid: tuple[int, int],
-    palette: int,
+    grid: tuple[int | None, int | None],
+    palette: int | None,
     fps: float,
     timeout: float,
     on_progress=None,
     capture=None,
     debug_dir: Path | None = None,
+    palette_cache: list[tuple[int, int, int]] | None = None,
+    on_calibrated=None,
 ) -> bytes:
     """Цикл приёма: возвращает склеенные данные всех кадров.
 
-    on_progress(got, total, note) вызывается при изменении прогресса.
+    grid/palette None — определяются автоматически из первого прочитанного
+    кадра и фиксируются (быстрый путь); при сбое чтения — определение заново
+    (например, сменился масштаб). palette_cache — измеренные цвета экрана
+    (кэш калибровки из .env); при успешной калибровке кадра вызывается
+    on_calibrated(палитра) — чтобы сохранить кэш. on_progress(got, total,
+    note) при изменениях.
     capture: объект с grab(region)->RGB ndarray и close(); по умолчанию
     выбирается автоматически (mss или портал).
     """
@@ -148,6 +173,7 @@ def receive(
     total = None
     misses = 0
     start = time.time()
+    locked: tuple[int, int] | None = (w, h) if w is not None else None
     if capture is None:
         capture = open_capture("auto", fps=fps)
     try:
@@ -157,7 +183,24 @@ def receive(
             t0 = time.time()
             img = capture.grab(region)
             try:
-                meta = read_frame(img, w, h, palette)
+                try:
+                    meta = read_frame(
+                        img,
+                        *(locked if locked is not None else (None, None)),
+                        palette,
+                        palette_override=palette_cache,
+                    )
+                except VisionError:
+                    if locked is None:
+                        raise
+                    locked = None  # конфиг сбился (масштаб/сдвиг) — ищем заново
+                    meta = read_frame(img, None, None, palette,
+                                      palette_override=palette_cache)
+                locked = (meta["config"]["w"], meta["config"]["h"])
+                if meta.get("calibrated_palette"):
+                    palette_cache = meta["calibrated_palette"]
+                    if on_calibrated:
+                        on_calibrated(palette_cache)
                 idx, total = meta["index"], meta["total"]
                 if idx not in grids:
                     E.decode_frame(meta["grid"])  # CRC кадра
@@ -204,13 +247,14 @@ def unpack(data: bytes, out_arg: str | None) -> Path:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     apply_env_defaults(args)
-    if args.colors not in E.PALETTE_ORDER:
+    if args.colors is not None and args.colors not in E.PALETTE_ORDER:
         raise SystemExit(f"--colors: ожидалось одно из {E.PALETTE_ORDER}")
-    w, h = args.grid
-    try:
-        E.validate_grid(w, h)
-    except ValueError as e:
-        raise SystemExit(f"--grid: {e}")
+    w, h = args.grid if args.grid else (None, None)
+    if w is not None:
+        try:
+            E.validate_grid(w, h)
+        except ValueError as e:
+            raise SystemExit(f"--grid: {e}")
 
     if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
         print("note: Wayland-сессия — захват через портал (появится диалог согласия).")
@@ -246,8 +290,10 @@ def main(argv: list[str] | None = None) -> int:
         print("область не выбрана — выход")
         cap.close()
         return 1
+    cfg_s = f"сетка {w}x{h}" if w is not None else "сетка auto"
+    pal_s = f"цветов {args.colors}" if args.colors is not None else "цвета auto"
     print(f"область: {region[0]},{region[1]} {region[2]}x{region[3]}px | "
-          f"сетка {w}x{h} | цветов {args.colors} | fps {args.fps:g}")
+          f"{cfg_s} | {pal_s} | fps {args.fps:g}")
 
     def progress(got: int, total: int, note: str):
         line = f"\rкадров: {got}/{total or '?'}, осталось: {max(0, (total or 0) - got)}"
@@ -259,7 +305,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         data = receive(region, (w, h), args.colors, args.fps, args.timeout,
                        progress, capture=cap,
-                       debug_dir=Path(tempfile.gettempdir()) / "imgtr_debug" if args.debug else None)
+                       debug_dir=Path(tempfile.gettempdir()) / "imgtr_debug" if args.debug else None,
+                       palette_cache=_load_cal_palette(),
+                       on_calibrated=_save_cal_palette)
     except KeyboardInterrupt:
         print("\nостановлено пользователем")
         return 130

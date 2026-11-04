@@ -27,6 +27,9 @@ k = log2(N) бит на ячейку payload. Каждая палитра нач
       всего кадров          16 бит
       длина payload в байт. 16 бит
       CRC32 payload         32 бита
+  - полоса калибровки: 2 строки сразу под заголовком, по ним перебираются
+    индексы палитры (0, 1, ..., N-1, 0, 1, ...). Приёмник снимает с них
+    реально отображаемые цвета (авто-калибровка под экран);
   - полезная нагрузка: все оставшиеся ячейки, растровый порядок,
     k бит на ячейку (MSBfirst); хвост добивается нулями (белые ячейки).
 
@@ -157,7 +160,22 @@ def _reserved_cells(w: int, h: int) -> set[tuple[int, int]]:
     for y in range(y0 + MARGIN + FINDER, y0 + MARGIN + FINDER + header_rows(w)):
         for x in range(x0, x1):
             reserved.add((x, y))
+    for x, y in _strip_cells(w, h):
+        reserved.add((x, y))
     return reserved
+
+
+def _strip_cells(w: int, h: int) -> list[tuple[int, int]]:
+    """Полоса калибровки: 2 строки сразу под заголовком, полная ширина
+    внутренней области. Ячейка с порядковым номером p несёт палитру[p % N].
+    Работает при любой ширине: нужно лишь 2*(w-6) >= N (при w >= 16 верно)."""
+    x0, y0, x1, _ = _inner(w, h)
+    y_start = y0 + MARGIN + FINDER + header_rows(w)
+    return [
+        (x, y)
+        for y in range(y_start, min(y_start + 2, h - BORDER - MARGIN))
+        for x in range(x0, x1)
+    ]
 
 
 def _bits(value: int, width: int) -> list[int]:
@@ -175,13 +193,14 @@ def frame_capacity(w: int, h: int, palette: int = 2) -> int:
     """Сколько байт полезной нагрузки влезает в один кадр."""
     validate_palette(palette)
     validate_grid(w, h)
-    payload_cells, _, _ = _layout(w, h)
+    payload_cells, _, _, _ = _layout(w, h)
     k = palette.bit_length() - 1
     return len(payload_cells) * k // 8
 
 
-def _layout(w: int, h: int) -> tuple[set, list, list]:
-    """(payload-ячейки, header-ячейки, позиции трёх маркеров)."""
+def _layout(w: int, h: int) -> tuple[set, list, list, list]:
+    """(payload-ячейки, header-ячейки, позиции трёх маркеров, полоса калибровки)."""
+    strip = _strip_cells(w, h)
     reserved = _reserved_cells(w, h)
     x0, y0, x1, y1 = _inner(w, h)
     header_cells = [
@@ -196,7 +215,7 @@ def _layout(w: int, h: int) -> tuple[set, list, list]:
         if (x, y) not in reserved
     ]
     finders = ((x0, y0), (x1 - FINDER, y0), (x0, y1 - FINDER))
-    return payload, header_cells, finders
+    return payload, header_cells, finders, strip
 
 
 def encode_frames(
@@ -216,7 +235,7 @@ def encode_frames(
     if total > 0xFFFF:
         raise ValueError("слишком много кадров: уменьшите данные или увеличьте сетку")
 
-    payload_cells, header_cells, finders = _layout(w, h)
+    payload_cells, header_cells, finders, strip = _layout(w, h)
     k = palette.bit_length() - 1
     palette_id = PALETTE_ORDER.index(palette)
 
@@ -259,6 +278,9 @@ def encode_frames(
         values.extend([WHITE] * (len(payload_cells) - len(values)))
         for (x, y), v in zip(payload_cells, values):
             grid[y][x] = v
+        # полоса калибровки: перебор индексов палитры по модулю
+        for p, (x, y) in enumerate(strip):
+            grid[y][x] = p % palette
 
         frames.append(Frame(idx, total, len(chunk), crc, palette, grid))
     return frames
@@ -293,7 +315,7 @@ def _extract_by_border(grid: list[list[int]]) -> list[list[int]]:
 def _read_header(grid: list[list[int]]) -> dict:
     """Читает заголовок, проверяет W/H, палитру и маркеры."""
     h, w = len(grid), len(grid[0])
-    payload_cells, header_cells, finders = _layout(w, h)
+    payload_cells, header_cells, finders, _ = _layout(w, h)
     for cx, cy in finders:
         for dy in range(FINDER):
             for dx in range(FINDER):
