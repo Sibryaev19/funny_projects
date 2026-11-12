@@ -1,0 +1,28 @@
+{
+  "standard_fields": [
+    "summary",
+    "issuetype",
+    "status",
+    "priority",
+    "assignee",
+    "reporter",
+    "creator",
+    "created",
+    "updated",
+    "resolution",
+    "resolutiondate",
+    "duedate",
+    "labels",
+    "components",
+    "parent",
+    "subtasks",
+    "issuelinks",
+    "timeoriginalestimate",
+    "timeestimate",
+    "timespent"
+  ],
+  "custom_fields": {
+    "epic_link": null,
+    "story_points": null
+  }
+}

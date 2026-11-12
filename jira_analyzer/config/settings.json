@@ -1,0 +1,14 @@
+{
+  "data_dir": "data",
+  "fetch": {
+    "delay": 0.3,
+    "max_retries": 5,
+    "timeout": 30,
+    "backoff_step": 1.0,
+    "page_size": 100,
+    "expand_batch": 50,
+    "with_comments": false,
+    "date_from": null,
+    "date_to": null
+  }
+}

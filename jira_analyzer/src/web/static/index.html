@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jira_analyzer</title>
+<style>
+  :root { --accent: #4c81c9; --border: #d5dbe7; --bg: #fafafa; }
+  * { box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: var(--bg);
+         color: #1a1a2e; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 60px; }
+  h1 { border-bottom: 3px solid var(--accent); padding-bottom: 8px; font-size: 1.5em; }
+  .card { background: #fff; border: 1px solid var(--border); border-radius: 8px;
+          padding: 18px; margin-bottom: 16px; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 0.85em; color: #555; }
+  input, select { padding: 7px 10px; border: 1px solid var(--border); border-radius: 5px;
+                  font-size: 0.95em; min-width: 140px; }
+  input[type=checkbox] { transform: scale(1.15); }
+  .checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 6px; margin-top: 6px; }
+  .checks label { display: flex; gap: 8px; align-items: center; font-size: 0.9em;
+                  cursor: pointer; padding: 3px 6px; border-radius: 4px; }
+  .checks label:hover { background: #eef2fa; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+           padding: 10px 22px; font-size: 1em; cursor: pointer; }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { background: #9db3cd; cursor: wait; }
+  button.ghost { background: #fff; color: var(--accent); border: 1px solid var(--accent); }
+  #log { background: #10141f; color: #c9d6ea; font-family: Consolas, monospace;
+         font-size: 0.82em; border-radius: 6px; padding: 12px; height: 260px;
+         overflow-y: auto; white-space: pre-wrap; }
+  #results { margin-top: 8px; }
+  #results h1 { margin-top: 24px; }
+  .status { font-weight: 600; }
+  .status.running { color: #b8860b; } .status.done { color: #2e7d43; }
+  .status.error { color: #c0392b; } .status.stopped { color: #b8860b; }
+  #progress_line { font-size: 0.88em; color: #2c3e6b; font-variant-numeric: tabular-nums; }
+  /* баннер незавершённой выгрузки: «Продолжить / Начать заново» */
+  #resume_banner { background: #fff7e0; border: 1px solid #e6d38a; border-radius: 6px;
+                   padding: 10px 12px; margin-top: 12px; font-size: 0.9em;
+                   display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .hint { font-size: 0.85em; color: #777; }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 3px solid #d8dee9;
+          border-top-color: var(--accent); border-radius: 50%;
+          animation: r 0.8s linear infinite; vertical-align: -2px; margin-right: 8px; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  /* модальное окно выбора метрик: остальной экран затемнён и размыт */
+  .modal-overlay { position: fixed; inset: 0; z-index: 50; display: flex;
+                   align-items: center; justify-content: center;
+                   background: rgba(18, 24, 42, 0.45); backdrop-filter: blur(4px); }
+  .modal { position: relative; background: #fff; border-radius: 10px;
+           padding: 20px 22px 18px; width: min(500px, 94vw); max-height: 86vh;
+           overflow-y: auto; box-shadow: 0 14px 44px rgba(0, 0, 0, 0.35); }
+  .modal h3 { margin: 0 0 12px; font-size: 1.1em; }
+  .modal-x { position: absolute; top: 10px; right: 10px; width: 30px; height: 30px;
+             padding: 0; background: #eef2fa; color: #2c3e6b; border: 1px solid #cfd6e4;
+             border-radius: 6px; font-size: 1em; cursor: pointer; }
+  .modal-x:hover { background: #dde7f5; }
+  .m-field { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
+  .m-field label { font-size: 0.85em; color: #555; }
+  .m-field .hint { font-size: 0.78em; }
+  .sel-item { display: flex; align-items: center; gap: 8px; background: #fff;
+              border: 1px solid var(--border); border-radius: 6px;
+              padding: 7px 10px; margin-top: 6px; font-size: 0.92em; }
+  .sel-item .slabel { font-weight: 600; color: #2c3e6b; white-space: nowrap; }
+  .sel-item .psummary { color: #777; font-size: 0.85em; flex: 1; min-width: 0; }
+  .mini { background: #eef2fa; color: #2c3e6b; border: 1px solid #cfd6e4;
+          border-radius: 5px; padding: 3px 9px; font-size: 0.85em; cursor: pointer;
+          flex: none; }
+  .mini:hover:not(:disabled) { background: #dde7f5; }
+  .mini:disabled { opacity: 0.35; cursor: default; }
+  .zone { font-weight: 600; margin-bottom: 10px; }
+  /* таблица скачанных выгрузок */
+  table.dl { width: 100%; border-collapse: collapse; font-size: 0.88em; margin-top: 4px; }
+  table.dl th, table.dl td { border: 1px solid var(--border); padding: 5px 8px;
+                             text-align: left; white-space: nowrap; }
+  table.dl th { background: #eef2fa; color: #2c3e6b; }
+  table.dl tbody tr { cursor: pointer; }
+  table.dl tbody tr:hover { background: #f6f8fc; }
+  table.dl tbody tr.sel { background: #e3ecfa; box-shadow: inset 3px 0 0 var(--accent); }
+  table.dl td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  /* !important: перекрывает display у .spin и любых других классов */
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>jira_analyzer — анализ Jira-проекта</h1>
+
+  <div class="card">
+    <div class="zone">1 · Выгрузка задач из Jira</div>
+    <div class="row">
+      <div class="field">
+        <label>Проект Jira (ключ)</label>
+        <input id="project" placeholder="напр. CURATOR" value="CURATOR">
+      </div>
+      <div class="field">
+        <label>Jira (секция .env)</label>
+        <select id="jira_type">
+          <option value="apache">apache — тестовая (анонимно)</option>
+          <option value="jira">jira — корпоративная №1</option>
+          <option value="jira_delta">jira_delta — корпоративная №2</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>Дата с (YYYY-MM-DD, пусто = все)</label>
+        <input id="date_from" placeholder="2024-01-01">
+      </div>
+      <div class="field">
+        <label>Дата по (YYYY-MM-DD)</label>
+        <input id="date_to" placeholder="2025-01-01">
+      </div>
+      <div class="field">
+        <label>Лимит задач (тест, пусто = все)</label>
+        <input id="max_issues" type="number" min="1" placeholder="50">
+      </div>
+    </div>
+    <div class="row" style="align-items:center">
+      <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
+        <input type="checkbox" id="with_comments"> тянуть комментарии (медленно)
+      </label>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button id="fetch_btn" onclick="startFetch()">Скачать задачи</button>
+      <span class="hint">сохранится в data/raw/&lt;ключ&gt;; повторный запуск перезаписывает
+        папку (это и есть «обновить»). Тестовая jira "apache" работает без токена.
+        Прерванная выгрузка не пропадает: можно «Продолжить» с места остановки.</span>
+    </div>
+    <div id="resume_banner" class="hidden"></div>
+  </div>
+
+  <div class="card">
+    <div class="zone">2 · Анализ скачанных выгрузок</div>
+    <div id="dl_box"><span class="hint">загрузка…</span></div>
+
+    <details open style="margin-top:12px">
+      <summary style="cursor:pointer;font-weight:600;margin-bottom:4px">Метрики для отчёта</summary>
+      <div class="hint" id="sel_hint" style="margin-top:6px">
+        список пуст — добавь метрики кнопкой ниже; одну метрику можно добавлять
+        несколько раз с разными параметрами, порядок в списке = порядок в отчёте
+      </div>
+      <div id="sel_list"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="ghost" onclick="openModal()">+ Добавить метрику</button>
+        <span class="hint hidden" id="load_warn" style="color:#c0392b"></span>
+      </div>
+    </details>
+
+    <div class="row" style="margin-top:16px">
+      <button id="run_btn" onclick="startRun()">Запустить анализ</button>
+      <span class="hint" id="run_hint"></span>
+    </div>
+  </div>
+
+  <div class="card hidden" id="progress_card">
+    <div class="row" style="align-items:center">
+      <span id="spinner" class="spin"></span>
+      <span class="status running" id="status">запуск…</span>
+      <span id="progress_line"></span>
+      <span style="flex:1"></span>
+      <button class="ghost hidden" id="stop_btn" onclick="stopJob()">⏹ Стоп</button>
+      <button class="ghost hidden" id="dl_html" onclick="download('html')">Скачать HTML</button>
+      <button class="ghost hidden" id="dl_xlsx" onclick="download('xlsx')">Скачать Excel</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <div id="results"></div>
+
+  <!-- модальное окно добавления метрики (форма строится из декларации backend) -->
+  <div class="modal-overlay hidden" id="overlay">
+    <div class="modal">
+      <button class="modal-x" onclick="closeModal()" title="закрыть (Esc)">✕</button>
+      <h3 id="m_title">Добавить метрику</h3>
+      <div class="m-field">
+        <label>Метрика</label>
+        <select id="m_select" onchange="renderFields()">
+          <option value="">выбери метрику…</option>
+        </select>
+      </div>
+      <div id="m_fields"></div>
+      <div class="row" style="margin-top:18px">
+        <button id="m_add_btn" onclick="addInstance()">Добавить</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script src="/static/vendor/echarts.min.js"></script>
+<script src="/static/blocks.js"></script>
+<script>
+let jobId = null, timer = null, finished = true, jobKind = 'analyze';
+let METRICS = [];   // декларации метрик (id, label, description, params) из /api/metrics
+let selected = [];  // экземпляры [{metric_id, params}]; порядок = порядок в отчёте
+let editIndex = null;   // индекс редактируемого экземпляра (null = режим добавления)
+let DOWNLOADS = [];  // скачанные выгрузки из /api/downloads
+let dlFolder = null; // выбранная для анализа папка
+
+// фазы выгрузки для баннера и строки прогресса (зеркало PHASE_LABELS в jobs.py)
+const PHASE_RU = { issues: 'задачи', changelog: 'история изменений',
+                   doload: 'догрузка историй', comments: 'комментарии',
+                   commit: 'сборка файлов', unknown: 'фаза неизвестна' };
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = String(text);
+  return e;
+}
+
+// ---------------- декларации метрик ----------------
+
+fetch('/api/metrics').then(r => r.json()).then(data => {
+  METRICS = data.metrics || [];
+  const sel = document.getElementById('m_select');
+  for (const m of METRICS) {
+    const o = document.createElement('option');
+    o.value = m.id;
+    o.textContent = m.label + ((m.params || []).length ? '  ⚙' : '');
+    sel.appendChild(o);
+  }
+  const errs = Object.entries(data.load_errors || {});
+  if (errs.length) {
+    const warn = document.getElementById('load_warn');
+    warn.classList.remove('hidden');
+    warn.textContent = 'Не загрузились файлы метрик: ' +
+      errs.map(([f, e]) => `${f} (${e})`).join('; ');
+  }
+});
+
+loadDownloads();
+
+// ---------------- модальное окно ----------------
+
+function openModal() {
+  editIndex = null;
+  const sel = document.getElementById('m_select');
+  sel.value = '';
+  sel.disabled = false;
+  document.getElementById('m_fields').innerHTML = '';
+  document.getElementById('m_title').textContent = 'Добавить метрику';
+  document.getElementById('m_add_btn').textContent = 'Добавить';
+  document.getElementById('overlay').classList.remove('hidden');
+}
+
+// редактирование существующего экземпляра: та же модалка, метрика зафиксирована,
+// поля предзаполнены значениями экземпляра поверх дефолтов
+function editInstance(i) {
+  editIndex = i;
+  const inst = selected[i];
+  const sel = document.getElementById('m_select');
+  sel.value = inst.metric_id;
+  sel.disabled = true;
+  renderFields();
+  document.querySelectorAll('#m_fields [data-pname]').forEach(inp => {
+    const v = inst.params[inp.dataset.pname];
+    if (v !== undefined) inp.value = v;
+  });
+  document.getElementById('m_title').textContent = 'Изменить метрику';
+  document.getElementById('m_add_btn').textContent = 'Сохранить';
+  document.getElementById('overlay').classList.remove('hidden');
+}
+
+function closeModal() {
+  editIndex = null;
+  document.getElementById('m_select').disabled = false;
+  document.getElementById('overlay').classList.add('hidden');
+}
+
+// клик мимо окна и Esc закрывают
+document.getElementById('overlay').addEventListener('click', e => {
+  if (e.target.id === 'overlay') closeModal();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeModal();
+});
+// баннер незавершённой выгрузки следит за полем ключа проекта
+document.getElementById('project').addEventListener('input', renderResumeBanner);
+
+function currentMetric() {
+  const id = document.getElementById('m_select').value;
+  return METRICS.find(m => m.id === id);
+}
+
+// поля параметров генерируются из декларации метрики: тип → вид поля,
+// default → предзаполнение, placeholder → серый пример, hint → пояснение
+function renderFields() {
+  const box = document.getElementById('m_fields');
+  box.innerHTML = '';
+  const m = currentMetric();
+  if (!m) return;
+  for (const p of (m.params || [])) {
+    const wrap = document.createElement('div');
+    wrap.className = 'm-field';
+    const lab = document.createElement('label');
+    lab.textContent = p.label + (p.required ? ' *' : '');
+    wrap.appendChild(lab);
+    let inp;
+    if (p.type === 'select') {
+      inp = document.createElement('select');
+      const empty = document.createElement('option');
+      empty.value = ''; empty.textContent = '— выбери —';
+      inp.appendChild(empty);
+      (p.options || []).forEach(o => {
+        const opt = document.createElement('option');
+        opt.value = o; opt.textContent = o;
+        inp.appendChild(opt);
+      });
+      if (p.default != null) inp.value = p.default;
+    } else {
+      inp = document.createElement('input');
+      inp.type = p.type === 'number' ? 'number' : (p.type === 'date' ? 'date' : 'text');
+      if (p.type === 'number') inp.step = 'any';
+      if (p.default != null) inp.value = p.default;
+      if (p.placeholder) inp.placeholder = p.placeholder;
+    }
+    inp.dataset.pname = p.name;
+    wrap.appendChild(inp);
+    if (p.hint) {
+      const h = document.createElement('div');
+      h.className = 'hint';
+      h.textContent = p.hint;
+      wrap.appendChild(h);
+    }
+    box.appendChild(wrap);
+  }
+}
+
+function addInstance() {
+  const m = currentMetric();
+  if (!m) { alert('Сначала выбери метрику'); return; }
+  const params = {};
+  document.querySelectorAll('#m_fields [data-pname]').forEach(inp => {
+    const v = String(inp.value).trim();
+    if (v !== '') params[inp.dataset.pname] = v;
+  });
+  for (const p of (m.params || [])) {
+    if (p.required && !(p.name in params) && p.default == null) {
+      alert('Заполни обязательный параметр: ' + p.label);
+      return;
+    }
+  }
+  if (editIndex !== null) {
+    selected[editIndex] = { metric_id: m.id, params };   // сохраняем на том же месте
+  } else {
+    selected.push({ metric_id: m.id, params });
+  }
+  renderSelected();
+  closeModal();
+}
+
+// ---------------- список выбранных ----------------
+
+function paramSummary(m, params) {
+  const parts = [];
+  for (const p of (m.params || [])) {
+    const v = params[p.name] !== undefined ? params[p.name] : p.default;
+    if (v === undefined || v === null || v === '') continue;
+    const lab = p.label.charAt(0).toLowerCase() + p.label.slice(1);
+    parts.push(lab + ': ' + v);
+  }
+  return parts.join(', ');
+}
+
+function renderSelected() {
+  const list = document.getElementById('sel_list');
+  list.innerHTML = '';
+  document.getElementById('sel_hint').classList.toggle('hidden', selected.length > 0);
+  selected.forEach((inst, i) => {
+    const m = METRICS.find(x => x.id === inst.metric_id) ||
+              { label: inst.metric_id, params: [] };
+    const row = document.createElement('div');
+    row.className = 'sel-item';
+    const name = document.createElement('span');
+    name.className = 'slabel';
+    name.textContent = m.label;
+    const sum = document.createElement('span');
+    sum.className = 'psummary';
+    sum.textContent = paramSummary(m, inst.params);
+    const edit = document.createElement('button');
+    edit.className = 'mini'; edit.textContent = '✎'; edit.title = 'изменить параметры';
+    edit.onclick = () => editInstance(i);
+    const up = document.createElement('button');
+    up.className = 'mini'; up.textContent = '↑'; up.title = 'выше';
+    up.disabled = i === 0;
+    up.onclick = () => {
+      [selected[i - 1], selected[i]] = [selected[i], selected[i - 1]];
+      renderSelected();
+    };
+    const down = document.createElement('button');
+    down.className = 'mini'; down.textContent = '↓'; down.title = 'ниже';
+    down.disabled = i === selected.length - 1;
+    down.onclick = () => {
+      [selected[i + 1], selected[i]] = [selected[i], selected[i + 1]];
+      renderSelected();
+    };
+    const del = document.createElement('button');
+    del.className = 'mini'; del.textContent = '✕'; del.title = 'убрать из отчёта';
+    del.onclick = () => { selected.splice(i, 1); renderSelected(); };
+    row.append(name, sum, edit, up, down, del);
+    list.appendChild(row);
+  });
+}
+
+// ---------------- список скачанных выгрузок ----------------
+
+function loadDownloads() {
+  fetch('/api/downloads').then(r => r.json()).then(data => {
+    DOWNLOADS = data.downloads || [];
+    renderDownloads();
+    renderResumeBanner();
+  });
+}
+
+// незавершённый прогресс (_partial) по ключу проекта
+function partialFor(project) {
+  const d = DOWNLOADS.find(x => x.folder === project);
+  return (d && d.partial) ? d.partial : null;
+}
+
+function partialText(p) {
+  const phase = PHASE_RU[p.phase] || p.phase || 'фаза неизвестна';
+  const n = (p.files && p.files['issues.jsonl']) || 0;
+  const total = p.totals && p.totals.issues;
+  const when = p.updated_at ? p.updated_at.slice(0, 16).replace('T', ' ') + ' UTC' : '';
+  return phase + ': скачано задач ' + n + (total ? ' / ' + total : '') +
+         (when ? ', обновлено ' + when : '');
+}
+
+// баннер «Продолжить / Начать заново» в зоне выгрузки
+function renderResumeBanner() {
+  const banner = document.getElementById('resume_banner');
+  const project = document.getElementById('project').value.trim();
+  const p = project && partialFor(project);
+  if (!p) { banner.classList.add('hidden'); banner.innerHTML = ''; return; }
+  banner.innerHTML = '';
+  banner.appendChild(el('span', null, '⏳ Незавершённая выгрузка: ' + partialText(p)));
+  const resume = document.createElement('button');
+  resume.className = 'mini'; resume.textContent = 'Продолжить';
+  resume.title = 'докачать с места остановки';
+  resume.onclick = () => startFetch('resume');
+  const fresh = document.createElement('button');
+  fresh.className = 'mini'; fresh.textContent = 'Начать заново';
+  fresh.title = 'стереть незавершённый прогресс';
+  fresh.onclick = () => {
+    if (confirm('Стереть незавершённый прогресс «' + project + '» и качать с нуля?'))
+      startFetch('fresh');
+  };
+  banner.append(resume, fresh);
+  banner.classList.remove('hidden');
+}
+
+function fmtFetched(s) {
+  return s ? s.slice(0, 10) + ' ' + s.slice(11, 16) : '—';
+}
+
+function renderDownloads() {
+  const box = document.getElementById('dl_box');
+  if (!DOWNLOADS.length) {
+    box.innerHTML = '<span class="hint">пока ничего не скачано — начни с блока 1 выше</span>';
+    updateRunHint();
+    return;
+  }
+  if (!dlFolder || !DOWNLOADS.some(d => d.folder === dlFolder)) {
+    dlFolder = DOWNLOADS[0].folder;   // первая строка (свежая) выбрана по умолчанию
+  }
+  const t = document.createElement('table');
+  t.className = 'dl';
+  const thead = el('thead');
+  ['Выбор', 'Ключ', 'Jira', 'Задач', 'Событий', 'Выгружено (UTC)'].forEach(h => {
+    thead.appendChild(el('th', null, h));
+  });
+  t.appendChild(thead);
+  const tbody = el('tbody');
+  DOWNLOADS.forEach(d => {
+    const tr = el('tr');
+    if (d.folder === dlFolder) tr.classList.add('sel');
+    tr.onclick = () => { dlFolder = d.folder; renderDownloads(); };
+    tr.appendChild(el('td', null, d.folder === dlFolder ? '●' : ''));
+    tr.appendChild(el('td', 'slabel', d.folder));
+    tr.appendChild(el('td', null, d.jira_type || '—'));
+    const tdIssues = el('td', 'num', d.issues === null || d.issues === undefined ? '—' : d.issues);
+    const tdEvents = el('td', 'num', d.changelog_events === null || d.changelog_events === undefined ? '—' : d.changelog_events);
+    tr.appendChild(tdIssues);
+    tr.appendChild(tdEvents);
+    tr.appendChild(el('td', null, fmtFetched(d.fetched_at)));
+    tbody.appendChild(tr);
+  });
+  t.appendChild(tbody);
+  box.innerHTML = '';
+  box.appendChild(t);
+  updateRunHint();
+}
+
+function updateRunHint() {
+  document.getElementById('run_hint').textContent =
+    dlFolder ? 'анализ по выгрузке: ' + dlFolder : 'сначала скачай задачи в блоке 1';
+}
+
+// ---------------- запуск (fetch и анализ — один механизм заданий) ----------------
+
+function startFetch(mode) {   // mode: undefined | 'resume' | 'fresh'
+  const project = document.getElementById('project').value.trim();
+  if (!project) { alert('Укажи ключ проекта'); return; }
+  const jt = document.getElementById('jira_type').value;
+  const known = DOWNLOADS.find(d => d.folder === project);
+  if (known && known.jira_type && known.jira_type !== jt &&
+      !confirm('В папке «' + project + '» уже лежит выгрузка из другой Jira (' +
+               known.jira_type + '). Перезаписать её выгрузкой из ' + jt + '?')) return;
+  let resume = false, fresh = false;
+  const partial = known && known.partial;
+  if (mode === 'resume') resume = true;
+  else if (mode === 'fresh') fresh = true;
+  else if (partial) {
+    // «Скачать задачи» при незавершённом прогрессе — выбор через диалог
+    if (confirm('У «' + project + '» есть незавершённая выгрузка (' +
+                partialText(partial) + ').\n\nОК — продолжить её, Отмена — начать заново с нуля.'))
+      resume = true;
+    else
+      fresh = true;
+  }
+  launchJob('/api/fetch', {
+    project,
+    jira_type: jt,
+    max_issues: document.getElementById('max_issues').value
+                ? +document.getElementById('max_issues').value : null,
+    date_from: document.getElementById('date_from').value || null,
+    date_to: document.getElementById('date_to').value || null,
+    with_comments: document.getElementById('with_comments').checked,
+    resume, fresh,
+  }, 'fetch');
+}
+
+function stopJob() {
+  fetch(`/api/job/${jobId}/stop`, { method: 'POST' })
+    .then(r => r.json()).then(res => { if (res.detail) alert(res.detail); });
+}
+
+function startRun() {
+  if (!dlFolder) { alert('Выбери выгрузку в таблице (или скачай в блоке 1)'); return; }
+  launchJob('/api/run', {
+    project: dlFolder,
+    metrics: selected.length ? selected : null,   // null = все с дефолтами
+    skip_fetch: true,
+  }, 'analyze');
+}
+
+function launchJob(url, body, kind) {
+  jobKind = kind;
+  fetch(url, { method: 'POST', headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify(body) })
+    .then(r => r.json()).then(res => {
+      if (res.detail) { alert(res.detail); return; }   // текст HTTPException (400/409)
+      jobId = res.job_id;
+      finished = false;
+      document.getElementById('results').innerHTML = '';
+      document.getElementById('dl_html').classList.add('hidden');
+      document.getElementById('dl_xlsx').classList.add('hidden');
+      document.getElementById('stop_btn').classList.add('hidden');
+      document.getElementById('progress_line').textContent = '';
+      document.getElementById('progress_card').classList.remove('hidden');
+      setControls(true);
+      timer = setInterval(poll, 1000);
+      poll();
+    })
+    .catch(e => alert('Ошибка запроса: ' + e));
+}
+
+function setControls(running) {
+  document.getElementById('run_btn').disabled = running;
+  document.getElementById('fetch_btn').disabled = running;
+  document.getElementById('spinner').classList.toggle('hidden', !running);
+}
+
+function setStatus(text, cls) {
+  const el = document.getElementById('status');
+  el.textContent = text;
+  el.className = 'status ' + cls;
+}
+
+function download(fmt) {
+  window.open(`/api/job/${jobId}/report?format=${fmt}`, '_blank');
+}
+
+function progressText(p) {
+  const total = (p.total === null || p.total === undefined) ? '?' : p.total;
+  const pct = (p.total > 0) ? ' (' + Math.round(100 * p.done / p.total) + '%)' : '';
+  return (p.phase ? p.phase + ': ' : '') + p.done + ' / ' + total + pct;
+}
+
+function poll() {
+  if (finished) return;
+  fetch(`/api/job/${jobId}`).then(r => r.json()).then(job => {
+    if (finished) return;
+    const log = document.getElementById('log');
+    log.textContent = job.log.join('\n');
+    log.scrollTop = log.scrollHeight;
+    document.getElementById('progress_line').textContent =
+      job.progress ? progressText(job.progress) : '';
+    document.getElementById('stop_btn').classList.toggle('hidden', !job.stoppable);
+    if (job.status === 'running') { setStatus('выполняется…', 'running'); return; }
+    finished = true;
+    clearInterval(timer);
+    document.getElementById('spinner').classList.add('hidden');
+    document.getElementById('stop_btn').classList.add('hidden');
+    setControls(false);
+    if (job.status === 'done') {
+      if (jobKind === 'fetch') {
+        setStatus('выгрузка готова — папка появилась в таблице блока 2', 'done');
+        if (job.project) document.getElementById('project').value = job.project;
+        loadDownloads();
+      } else {
+        setStatus('готово — результаты и отчёты ниже', 'done');
+        document.getElementById('dl_html').classList.remove('hidden');
+        document.getElementById('dl_xlsx').classList.remove('hidden');
+        renderResults();
+      }
+    } else if (job.status === 'stopped') {
+      setStatus('остановлено — прогресс сохранён (продолжить: «Скачать задачи» → «Продолжить»)',
+                'stopped');
+      if (jobKind === 'fetch') loadDownloads();
+    } else {
+      setStatus('ошибка: ' + (job.error || 'смотри лог'), 'error');
+      if (jobKind === 'fetch') loadDownloads();   // прогресс мог сохраниться — обновить баннер
+    }
+  });
+}
+
+function renderResults() {
+  fetch(`/api/job/${jobId}/blocks`).then(r => r.json()).then(data => {
+    const box = document.getElementById('results');
+    box.innerHTML = '';
+    const h = document.createElement('h1');
+    h.style.marginTop = '32px';
+    h.textContent = 'Результаты: ' + data.project;
+    box.appendChild(h);
+    blocks.renderAll(box, data);
+    box.scrollIntoView({ behavior: 'smooth' });
+  });
+}
+</script>
+</body>
+</html>
