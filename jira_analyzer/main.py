@@ -16,6 +16,17 @@ import argparse
 import logging
 import sys
 
+# Корпоративные сети часто перехватывают TLS (прокси/антивирус): их корневой
+# сертификат есть в хранилище Windows, но нет в bundled-наборе certifi.
+# truststore переключает ssl на системный список доверия (проверка остаётся
+# включённой). Патчить ssl можно ровно один раз на процесс и только до того,
+# как код начнёт создавать SSLContext — поэтому блок стоит до импорта пайплайна.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass  # нет пакета/платформы — работаем как раньше
+
 from src.core.pipeline import PipelineOptions, run_pipeline
 
 

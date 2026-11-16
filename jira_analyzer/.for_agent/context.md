@@ -72,7 +72,7 @@ matplotlib / FastAPI / PDF: weasyprint или HTML→PDF. Финально за�
   рендер фигур защищён try/except (кривые данные не роняют задание).
 - PDF-экспорт не реализован (осознанно, см. plan).
 
-## Задача v5: разделение выгрузки и анализа в web (done 2026-11-13, план plan-v5_fetch_analysis_split.md)
+## Задача v5: разделение выгрузки и анализа в web (done 2026-11-13)
 Решения, закреплённые навсегда:
 - Скачал один раз — анализируй сколько угодно: web разделён на две зоны —
   «1 · Выгрузка задач из Jira» (POST /api/fetch, fetch-only задание) и
@@ -91,7 +91,7 @@ matplotlib / FastAPI / PDF: weasyprint или HTML→PDF. Финально за�
 - CLI без изменений: --skip-fetch = то же самое руками; UI шлёт только
   project+metrics+skip_fetch (старые поля /api/run допустимы).
 
-## Задача v4: параметры метрик (done 2026-11-13, план plan-v4_metric_params.md)
+## Задача v4: параметры метрик (done 2026-11-13)
 Решения, закреплённые навсегда:
 - Метрика декларирует `params = [Param(...)]` (src/components/params.py: поля
   name/label/type number·text·date·select/default/placeholder/required/options/hint).
@@ -113,7 +113,7 @@ matplotlib / FastAPI / PDF: weasyprint или HTML→PDF. Финально за�
 - build_excel при нуле табличных блоков пишет пояснительный лист, а не падает.
 
 ## Задача v3: компонентная архитектура метрик (done 2026-11-13)
-Реализовано по плану plan-v3_components.md. Решения, закреплённые навсегда:
+Решения, закреплённые навсегда:
 - Метрика = компонент: .py-файл в metrics/ (класс-наследник BaseMetric), автоскан
   при старте, без декораторов. Старые registry/plots/stats удалены вместе с src/analysis/.
 - Выход метрики = список BlockSpec (pydantic, дискриминатор type): table/bar/line/pie/list.
@@ -129,7 +129,7 @@ matplotlib / FastAPI / PDF: weasyprint или HTML→PDF. Финально за�
 - «Скачать HTML» отдаёт attachment — браузер скачивает файл (пользователь подтвердил:
   файл падает в Downloads), офлайн-рендер проверен через /static копию.
 
-## Задача v6: надёжный fetch — чекпоинты, возобновление, Стоп (done 2026-11-13, план plan-v6_fetch_resume.md)
+## Задача v6: надёжный fetch — чекпоинты, возобновление, Стоп (done 2026-11-13)
 Решения, закреплённые навсегда:
 - Выгрузка пишется в data/raw/<КЛЮЧ>/_partial/ с чекпоинтом state.json после
   каждой страницы задач/пачки changelog/задачи догрузки; корень папки не

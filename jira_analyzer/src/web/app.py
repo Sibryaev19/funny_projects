@@ -242,6 +242,13 @@ def job_report(job_id: str, format: str = "html") -> FileResponse:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # см. main.py: доверие хранилищу Windows, ровно один патч ssl на процесс,
+    # до любых SSLContext. Веб-задания выгрузки живут в этом же процессе.
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except Exception:
+        pass
     import uvicorn
     # порт из .env (WEB_PORT=8765), по умолчанию 8765
     port = int(load_env().get("WEB_PORT") or 8765)

@@ -1,25 +1,26 @@
 @echo off
 rem ============================================================
-rem  Запуск web-интерфейса jira_analyzer (двойной клик).
-rem  Окружение должно быть установлено — см. setup.bat
+rem  jira_analyzer web UI launcher (double click).
+rem  Environment must be installed first -- see setup.bat
+rem  ASCII ONLY: cmd.exe reads bat files in the OEM code page,
+rem  Cyrillic in UTF-8 breaks parsing. Keep this file ASCII.
 rem ============================================================
 setlocal
-chcp 65001 >nul
 if not exist "%~dp0.venv\Scripts\python.exe" (
-    echo [start] Окружение не установлено.
-    echo Сначала запусти setup.bat - он создаст .venv и поставит зависимости.
+    echo [start] Environment is not installed.
+    echo Run setup.bat first - it creates .venv and installs dependencies.
     pause
     exit /b 1
 )
 echo ============================================================
-echo   jira_analyzer - web-интерфейс
+echo   jira_analyzer - web UI
 echo.
-echo   Открой в браузере:  http://127.0.0.1:8765
-echo   (порт можно сменить в .env: WEB_PORT=...)
+echo   Open in browser:  http://127.0.0.1:8765
+echo   (change port in .env: WEB_PORT=...)
 echo.
-echo   Остановка: закрыть это окно или Ctrl+C
+echo   Stop: close this window or press Ctrl+C
 echo ============================================================
 "%~dp0.venv\Scripts\python.exe" -m src.web.app %*
 echo.
-echo Сервер остановлен. Окно можно закрыть.
+echo Server stopped. You can close this window.
 pause
