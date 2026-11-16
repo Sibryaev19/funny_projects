@@ -92,7 +92,11 @@ def main() -> None:
     p.add_argument("--fresh", action="store_true",
                    help="стереть незавершённый прогресс выгрузки и начать заново")
     p.add_argument("--max-issues", type=int, default=None, help="обрезать выгрузку (тест)")
-    p.add_argument("--skip-changelog", action="store_true", help="без истории изменений")
+    p.add_argument("--phases", choices=["both", "issues", "changelog"], default="both",
+                   help="что качать: both (задачи+история, по умолчанию), "
+                        "issues (только задачи — быстро), changelog (только "
+                        "история к уже скачанным задачам)")
+    p.add_argument("--skip-changelog", action="store_true", help="(устарело) алиас --phases issues")
     p.add_argument("--with-comments", action="store_true", help="тянуть комментарии")
     p.add_argument("--date-from", default=None, help="YYYY-MM-DD, только задачи с этой даты")
     p.add_argument("--date-to", default=None, help="YYYY-MM-DD, только до этой даты")
@@ -138,7 +142,8 @@ def main() -> None:
 
     result = run_pipeline(PipelineOptions(
         project=args.project, jira_type=args.jira_type,
-        max_issues=args.max_issues, skip_changelog=args.skip_changelog,
+        max_issues=args.max_issues, phases=args.phases,
+        skip_changelog=args.skip_changelog,
         with_comments=args.with_comments,
         date_from=args.date_from, date_to=args.date_to,
         metrics=instances, skip_fetch=args.skip_fetch,

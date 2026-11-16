@@ -106,12 +106,25 @@ class _Jsonl:
         self.f.close()
 
 
+PHASES = ("both", "issues", "changelog")
+
+
+def _norm_phases(phases: str | None, skip_changelog: bool) -> str:
+    """Фазы выгрузки. skip_changelog=True — устаревший алиас phases="issues"."""
+    if phases is None or phases == "both":
+        return "issues" if skip_changelog else "both"
+    if phases not in PHASES:
+        raise ValueError(f"phases: ожидалось одно из {PHASES}, получено {phases!r}")
+    return phases
+
+
 def fetch_project(
     project_key: str,
     jira_type: str,
     *,
     max_issues: int | None = None,
-    skip_changelog: bool = False,
+    phases: str = "both",
+    skip_changelog: bool = False,   # устаревший алиас phases="issues"
     with_comments: bool | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
@@ -121,7 +134,12 @@ def fetch_project(
     stop_event=None,
     progress=None,
 ) -> Path:
-    """Полный прогон выгрузки одного проекта. Возвращает папку с результатами.
+    """Выгрузка проекта с выбором фаз. Возвращает папку с результатами.
+
+    phases="both" — задачи + история (как раньше); "issues" — только задачи
+    (быстро, анализ доступен сразу); "changelog" — только история к УЖЕ
+    скачанным задачам (issues.jsonl должен быть в папке; сам не трогается).
+    Комментарии тянуться только вместе с задачами.
 
     resume=True — продолжить незавершённую (отпечаток параметров обязан
     совпасть); fresh=True — стереть прогресс и начать заново; без обоих флагов
@@ -129,6 +147,7 @@ def fetch_project(
     stop_event — кнопка «Стоп» (проверяется между страницами и пачками);
     progress(phase, done, total) — прогресс для web-интерфейса.
     """
+    phases = _norm_phases(phases, skip_changelog)
     validate_dates(date_from, date_to)
     cfg = load_config(jira_type, env_path=env_path)
     inst = cfg.jira[jira_type.lower()]
@@ -138,17 +157,25 @@ def fetch_project(
     if date_to:
         fs.date_to = date_to
     pull_comments = fs.with_comments if with_comments is None else with_comments
+    if phases == "changelog" and pull_comments:
+        log.info("Комментарии тянуться только вместе с задачами — пропускаю")
+        pull_comments = False
+
+    out_dir = cfg.data_dir / "raw" / project_key
+    if phases == "changelog" and not (out_dir / "issues.jsonl").exists():
+        raise ValueError(
+            f"В data/raw/{project_key} нет issues.jsonl — докачивать историю "
+            f"некуда. Сначала выгрузи задачи (phases=\"issues\" или \"both\").")
 
     client = JiraClient(
         inst.url, pat=inst.pat, auth=inst.auth,
         delay=fs.delay, max_retries=fs.max_retries,
         timeout=fs.timeout, backoff_step=fs.backoff_step,
     )
-    out_dir = cfg.data_dir / "raw" / project_key
     partial = out_dir / PARTIAL_NAME
     fp = fingerprint(project_key, jira_type, inst.url, date_from=fs.date_from,
                      date_to=fs.date_to, max_issues=max_issues,
-                     skip_changelog=skip_changelog, with_comments=pull_comments,
+                     phases=phases, with_comments=pull_comments,
                      fields=cfg.fields)
 
     prev = load_state(partial)
@@ -177,7 +204,7 @@ def fetch_project(
     else:
         prev = {
             "version": 1,
-            "phase": "issues",
+            "phase": "changelog" if phases == "changelog" else "issues",
             "fingerprint": fp,
             "files": {},
             "counts": {},
@@ -187,11 +214,12 @@ def fetch_project(
         }
     state = FetchState(partial, prev)
 
-    log.info("=== Выгрузка %s с %s (%s)%s ===", project_key, inst.url, inst.auth,
+    log.info("=== Выгрузка %s с %s (%s, фазы=%s)%s ===",
+             project_key, inst.url, inst.auth, phases,
              ", продолжение" if resumed else "")
 
-    keys = _run_phases(state, client, project_key, cfg, fs,
-                       max_issues, skip_changelog, pull_comments,
+    keys = _run_phases(state, client, out_dir, project_key, cfg, fs,
+                       max_issues, phases, pull_comments,
                        stop_event, progress, resumed)
 
     # ---------- коммит: из _partial в корень папки ----------
@@ -199,8 +227,9 @@ def fetch_project(
     state.save()
     t0 = time.monotonic()
     log.info("Собираю итоговые файлы (дедуп по ключу, последняя запись выигрывает)")
-    _commit_file(partial / "issues.jsonl", out_dir / "issues.jsonl")
-    if not skip_changelog:
+    if phases in ("both", "issues"):
+        _commit_file(partial / "issues.jsonl", out_dir / "issues.jsonl")
+    if phases in ("both", "changelog"):
         _commit_file(partial / "changelog.jsonl", out_dir / "changelog.jsonl")
     if pull_comments:
         _commit_file(partial / "comments.jsonl", out_dir / "comments.jsonl")
@@ -214,7 +243,7 @@ def fetch_project(
     if expected is not None and expected != len(keys):
         log.warning("Скачано задач: %d, сервер в total сообщил: %s", len(keys), expected)
     counts["issues_expected"] = expected
-    if not skip_changelog and keys:
+    if phases in ("both", "changelog") and keys:
         counts["changelog_events"] = state.counts().get("changelog_events", 0)
         counts["changelog_truncated"] = len(state.data.get("truncated", []))
     if pull_comments and keys:
@@ -225,6 +254,7 @@ def fetch_project(
         "jira_url": inst.url,
         "jira_type": jira_type,
         "project": project_key,
+        "phases": phases,
         "date_from": fs.date_from,
         "date_to": fs.date_to,
         "with_comments": pull_comments,
@@ -244,19 +274,22 @@ def fetch_project(
     return out_dir
 
 
-def _run_phases(state, client, project_key, cfg, fs,
-                max_issues, skip_changelog, pull_comments,
+def _run_phases(state, client, out_dir, project_key, cfg, fs,
+                max_issues, phases, pull_comments,
                 stop_event, progress, resumed) -> list[str]:
     """Фазы выгрузки: задачи -> changelog -> догрузка -> комментарии.
     Возвращает полный список ключей (нужен коммиту). Каждая фаза начинается,
-    только если чекпоинт ещё не за неё."""
+    только если чекпоинт ещё не за неё и входит в выбранные фазы (phases)."""
 
     partial = state.dir
     keys: list[str] = []
     issues_path = partial / "issues.jsonl"
 
     # ---------- фаза: задачи ----------
-    if state.data["phase"] == "issues":
+    if phases == "changelog":
+        # история качается к УЖЕ скачанным задачам: ключи из корня папки
+        keys = _read_keys(out_dir / "issues.jsonl")
+    elif state.data["phase"] == "issues":
         f_i = state.file("issues.jsonl")
         seen: set[str] = set()
         start_at = 0
@@ -304,7 +337,7 @@ def _run_phases(state, client, project_key, cfg, fs,
     truncated: list[str] = state.data.get("truncated", [])
 
     # ---------- фаза: changelog ----------
-    if state.data["phase"] == "changelog" and not skip_changelog and keys:
+    if state.data["phase"] == "changelog" and phases in ("both", "changelog") and keys:
         f_c = state.file("changelog.jsonl")
         cl_path = partial / "changelog.jsonl"
         done = f_c["count"] if resumed else 0
@@ -336,7 +369,7 @@ def _run_phases(state, client, project_key, cfg, fs,
         state.save()
 
     # ---------- фаза: догрузка полных историй ----------
-    if state.data["phase"] == "doload" and not skip_changelog and truncated:
+    if state.data["phase"] == "doload" and phases in ("both", "changelog") and truncated:
         f_c = state.file("changelog.jsonl")
         cl_path = partial / "changelog.jsonl"
         done = state.counts().get("doload", 0)
@@ -424,8 +457,11 @@ def main() -> None:
                         help="ключ секции .env (jira1/jira2/apache), по умолчанию apache")
     parser.add_argument("--max-issues", type=int, default=None,
                         help="обрезать выгрузку (смоук-тест)")
+    parser.add_argument("--phases", choices=PHASES, default="both",
+                        help="что качать: both (задачи+история), issues (только "
+                             "задачи), changelog (только история к скачанным)")
     parser.add_argument("--skip-changelog", action="store_true",
-                        help="не тянуть changelog (быстрый тест полей)")
+                        help="(устарело) алиас --phases issues")
     parser.add_argument("--with-comments", action="store_true",
                         help="тянуть комментарии (по умолчанию выключены)")
     parser.add_argument("--date-from", default=None, help="YYYY-MM-DD, включительно")
@@ -443,6 +479,7 @@ def main() -> None:
         fetch_project(
             args.project, args.jira_type,
             max_issues=args.max_issues,
+            phases=args.phases,
             skip_changelog=args.skip_changelog,
             with_comments=args.with_comments,
             date_from=args.date_from, date_to=args.date_to,

@@ -97,3 +97,21 @@ def test_missing_dump_raises(tmp_path):
                            out_dir=tmp_path / "reports")
     with pytest.raises(FileNotFoundError, match="выгрузк"):
         run_pipeline(opts)
+
+
+def test_events_metric_on_issues_only_becomes_hint_error(tmp_path):
+    """v7: выгрузка без истории (issues-only) — метрикам с requires=events
+    не падаем, а кладём понятную ошибку с подсказкой докачать."""
+    raw = synthetic_raw(tmp_path)
+    (raw / "changelog.jsonl").unlink()      # имитируем выгрузку phases=issues
+    opts = PipelineOptions(project="TESTP", skip_fetch=True,
+                           metrics=[{"metric_id": "overview", "params": {}},
+                                    {"metric_id": "rework_summary", "params": {}}],
+                           raw_dir=raw, out_dir=tmp_path / "reports")
+    result = run_pipeline(opts)
+    ids = [r.metric_id for r in result["results"]]
+    assert ids == ["overview"]              # метрики без событий живут
+    err = result["errors"][0]
+    assert err["metric_id"] == "rework_summary"
+    assert "история изменений" in err["error"]
+    assert "--phases changelog" in err["error"]

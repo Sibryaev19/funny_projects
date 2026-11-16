@@ -39,6 +39,7 @@ def _cycles(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 class LifecycleCycles(BaseMetric):
+    requires = ("issues", "events")
     id = "lifecycle_cycles"
     label = "Циклы задач (по задаче)"
     description = "время взятия в работу, время работы и общий lead по каждой задаче"
@@ -61,6 +62,7 @@ class LifecycleCycles(BaseMetric):
 
 
 class LifecycleSummary(BaseMetric):
+    requires = ("issues", "events")
     id = "lifecycle_summary"
     label = "Сводка времени жизни"
     description = "медианы и перцентили: сколько занимает взятие в работу, работа, общий цикл"

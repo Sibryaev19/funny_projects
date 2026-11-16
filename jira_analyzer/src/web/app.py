@@ -54,6 +54,7 @@ class FetchRequest(BaseModel):
     date_from: str | None = None
     date_to: str | None = None
     with_comments: bool = False
+    phases: str = "both"   # both | issues | changelog
     resume: bool = False
     fresh: bool = False
 
@@ -81,7 +82,8 @@ def metrics_list() -> dict:
     ensure_discovered()
     return {
         "metrics": [{"id": m.id, "label": m.label, "description": m.description,
-                     "params": [p.model_dump() for p in m.params]}
+                     "params": [p.model_dump() for p in m.params],
+                     "requires": list(getattr(m, "requires", ("issues",)))}
                     for m in METRICS.values()],
         "load_errors": load_errors(),
     }
@@ -104,7 +106,7 @@ def downloads_list() -> dict:
                 continue
             item = {"folder": d.name, "jira_type": None, "jira_url": None,
                     "fetched_at": None, "issues": None, "changelog_events": None,
-                    "with_comments": None,
+                    "with_comments": None, "phases": None,
                     "has_changelog": (d / "changelog.jsonl").exists(),
                     "partial": _partial_info(partial_state)}
             summary = d / "fetch_summary.json"
@@ -117,7 +119,8 @@ def downloads_list() -> dict:
                                 fetched_at=s.get("fetched_at"),
                                 issues=counts.get("issues"),
                                 changelog_events=counts.get("changelog_events"),
-                                with_comments=s.get("with_comments"))
+                                with_comments=s.get("with_comments"),
+                                phases=s.get("phases"))
                 except Exception:   # битый summary не должен прятать саму папку
                     pass
             out.append(item)
@@ -153,10 +156,13 @@ def fetch(req: FetchRequest) -> dict:
     """Запустить задание «только выгрузка»: задачи проекта -> data/raw/<ключ>.
     Незавершённый прогресс (_partial) требует явного выбора: resume или fresh."""
     project = _check_project(req.project.strip())
-    try:
-        validate_dates(req.date_from, req.date_to)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
+    if req.phases not in ("both", "issues", "changelog"):
+        raise HTTPException(400, "phases: both | issues | changelog")
+    if req.phases != "changelog":
+        try:
+            validate_dates(req.date_from, req.date_to)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
     partial_state = RAW_ROOT / project / "_partial" / "state.json"
     if partial_state.exists() and not req.resume and not req.fresh:
         raise HTTPException(409, "У проекта есть незавершённая выгрузка: выбери "
@@ -166,6 +172,7 @@ def fetch(req: FetchRequest) -> dict:
     opts = PipelineOptions(
         project=project, jira_type=req.jira_type,
         max_issues=req.max_issues, with_comments=req.with_comments,
+        phases=req.phases,
         date_from=req.date_from or None, date_to=req.date_to or None,
         resume=req.resume, fresh=req.fresh,
         fetch_only=True,

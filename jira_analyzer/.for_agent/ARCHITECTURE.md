@@ -7,10 +7,17 @@
 ```
 .env ──> fetch ──> data/raw/<КЛЮЧ>/_partial/* (чекпоинты) ─коммит─> data/raw/<КЛЮЧ>/
                     {issues.jsonl, changelog.jsonl, tree.json, fetch_summary.json}
-                ──> tables (3 pandas.DataFrame)
+                ──> tables (3 pandas.DataFrame; parquet-кеш в data/processed/<КЛЮЧ>/)
                 ──> metrics (список BlockSpec)
                 ──> payload ──> web-рендер (echarts) / офлайн report.html / Excel
 ```
+**Фазы выгрузки (v7):** `phases` = both | issues | changelog — качать можно
+только задачи, только историю (к УЖЕ скачанным задачам, issues.jsonl не
+трогается) или обе. `fetch_summary.json["phases"]` помечает, что в папке.
+Метрики декларируют `requires` (issues/events/comments): без истории
+событийные метрики disabled в web-модалке (тултип) и дают понятную ошибку
+в отчёте, а не падение. Парquet-кеш: src/core/cache.py — data/processed/,
+инвалидация по size+mtime_ns сырых jsonl, pyarrow (без него тихо без кеша).
 Скачал один раз — анализируй сколько угодно: fetch и анализ разделены
 (v5): web «1 · Выгрузка» = fetch-only задание, «2 · Анализ» = выбор папки
 из data/raw + пересчёт без fetch. CLI: `--skip-fetch`.
@@ -33,23 +40,31 @@ web-эндпоинтах (400) и в fetch-слое; date_to включител�
 
 **main.py** — CLI. `parse_metrics_spec()` парсит `'id(k=v),id2'` в экземпляры
 `{metric_id, params}` (значения строками — типы приведёт resolve_params);
-команды `--list-metrics`, `--check-metrics`; прогон = run_pipeline.
+команды `--list-metrics`, `--check-metrics`; `--phases` (устаревший
+--skip-changelog = phases issues); прогон = run_pipeline.
 
 **src/core/**
 - `config.py` — `load_env()`, `load_config(jira_type)` → AppConfig
   (JiraInstance: url/auth/token из секций .env по префиксу; FetchSettings:
   delays/retries/page_size). `PROJECT_ROOT` — корень проекта.
 - `pipeline.py` — оркестратор без логики: `PipelineOptions` (project,
-  jira_type, fetch-параметры, `metrics` — список экземпляров, `fetch_only`,
-  `skip_fetch`), `run_fetch()` (только выгрузка), `run_pipeline()`
-  (fetch? → load_tables → для каждого экземпляра: resolve_params → build →
-  sanitize_result → отчёты), `_instances()` (нормализация "id"|dict).
-- `tables.py` — `load_tables(raw_dir)` → {"issues", "events", "comments"}
-  DataFrame. issues: key, summary, type, status, status_category
-  ("To Do"/"In Progress"/"Done"), priority, assignee, reporter, created,
-  updated, resolved_at, duedate, resolution, components, parent, n_subtasks,
-  timespent_h. **Даты — Timestamp, UTC, tz-aware, NaT если нет.**
-  Помощники метрикам: `status_category_map()`, `status_events()`.
+  jira_type, fetch-параметры, `phases`, `metrics` — список экземпляров,
+  `fetch_only`, `skip_fetch`), `run_fetch()` (только выгрузка),
+  `run_pipeline()` (fetch? → load_tables → для каждого экземпляра:
+  requires-проверка → resolve_params → build → sanitize_result → отчёты;
+  метрика без нужных данных = ошибка с подсказкой докачать, не исключение),
+  `_instances()` (нормализация "id"|dict).
+- `cache.py` — parquet-кеш: `processed_dir(raw)` = data/processed/<ключ>/
+  (parent.parent!), сигнатура size+mtime_ns в manifest.json, `_fresh`/
+  `_load_parquet`/`_store` (os.replace — атомарно), HAVE_PARQUET=False →
+  тихо без кеша. **Не хранить в raw/** — /api/downloads сканирует raw.
+- `tables.py` — `load_tables(raw_dir, use_cache=True)` → {"issues",
+  "events", "comments"} DataFrame; свежий кеш читается сразу, иначе разбор
+  JSONL (`_build_tables`) + запись кеша. issues: key, summary, type, status,
+  status_category ("To Do"/"In Progress"/"Done"), priority, assignee,
+  reporter, created, updated, resolved_at, duedate, resolution, components,
+  parent, n_subtasks, timespent_h. **Даты — Timestamp, UTC, tz-aware, NaT
+  если нет.** Помощники метрикам: `status_category_map()`, `status_events()`.
 
 **src/fetch/** — client.py (`JiraClient`: Bearer/none, задержки, ретраи с
 +1с), issues.py (`build_jql` с валидацией дат и кавычками ключа,
@@ -58,14 +73,19 @@ web-эндпоинтах (400) и в fetch-слое; date_to включител�
 `validate_dates`), changelog.py (`iter_changelog`: expand батчами по 50 +
 догрузка урезанных через endpoint, если доступен), comments.py (off по
 умолчанию), tree.py (epic→task→subtask), state.py (`_partial/state.json`:
-fingerprint, load/save атомарно, truncate_files по офсетам), run.py
-(`fetch_project`: фазы issues→changelog→doload→comments→commit, каждая
-фаза пишет чекпоинт; `_Jsonl` — бинарная дозапись с точными офсетами;
-`FetchStopped` для «Стопа»; коммит с дедупом по ключу; CLI с --resume/--fresh;
-останавливается между страницами/пачками).
+fingerprint — project/jira_type/url/даты/max_issues/**phases**/comments/
+fields, load/save атомарно, truncate_files по офсетам), run.py
+(`fetch_project(phases=both|issues|changelog)`: фазы
+issues→changelog→doload→comments→commit, каждая фаза пишет чекпоинт и
+начинается только если входит в phases; changelog-only берёт ключи из
+готового out_dir/issues.jsonl и на коммите не трогает его; `_Jsonl` —
+бинарная дозапись с точными офсетами; `FetchStopped` для «Стопа»; коммит
+с дедупом по ключу; CLI с --phases/--resume/--fresh; останавливается между
+страницами/пачками).
 
 **src/components/** — фреймворк метрик и рендера:
-- `base.py` — `BaseMetric` (id/label/description/**params** +
+- `base.py` — `BaseMetric` (id/label/description/**params**/**requires**
+  (issues|events|comments; по умолчанию issues) +
   `build(tables, opts) -> [блоки]`), `MetricOpts` ({params}, `opts.get("имя")`),
   хелперы блоков `self.table/table_from_df/bar/bar_from_counts/line/pie/
   pie_from_counts/list_block` (JSON-safe автоматически).
@@ -100,10 +120,11 @@ fingerprint, load/save атомарно, truncate_files по офсетам), ru
 
 **src/web/**
 - `app.py` — FastAPI. GET `/` (index.html перечитывается каждый раз — правки
-  статики без рестарта), `/api/metrics` (декларации params), `/api/downloads`
-  (скан data/raw + fetch_summary.json + инфо о _partial для баннера резюма),
-  POST `/api/fetch` (fetch-only; resume/fresh обязательны при наличии
-  прогресса — иначе 409; валидация дат → 400) и `/api/run` (анализ; UI шлёт
+  статики без рестарта), `/api/metrics` (декларации params + requires),
+  `/api/downloads` (скан data/raw + fetch_summary.json + has_changelog/phases
+  + инфо о _partial для баннера резюма), POST `/api/fetch` (fetch-only с
+  phases; resume/fresh обязательны при наличии прогресса — иначе 409;
+  валидация дат → 400, кроме phases=changelog) и `/api/run` (анализ; UI шлёт
   project+metrics+skip_fetch=true), POST `/api/job/{id}/stop` («Стоп», 409
   если задание не идущая выгрузка). Имя проекта санитизируется:
   `^[A-Za-z0-9][A-Za-z0-9._-]*$` (из него строится путь).

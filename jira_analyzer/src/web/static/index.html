@@ -122,14 +122,22 @@
     </div>
     <div class="row" style="align-items:center">
       <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
-        <input type="checkbox" id="with_comments"> тянуть комментарии (медленно)
+        <input type="checkbox" id="phase_issues" checked onchange="onPhaseChange()"> задачи
+      </label>
+      <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
+        <input type="checkbox" id="phase_changelog" checked onchange="onPhaseChange()"> история изменений (медленно)
+      </label>
+      <label style="display:flex;gap:8px;align-items:center;cursor:pointer" id="comments_label">
+        <input type="checkbox" id="with_comments"> комментарии
       </label>
     </div>
     <div class="row" style="margin-top:14px">
-      <button id="fetch_btn" onclick="startFetch()">Скачать задачи</button>
-      <span class="hint">сохранится в data/raw/&lt;ключ&gt;; повторный запуск перезаписывает
-        папку (это и есть «обновить»). Тестовая jira "apache" работает без токена.
-        Прерванная выгрузка не пропадает: можно «Продолжить» с места остановки.</span>
+      <button id="fetch_btn" onclick="startFetch()">Скачать</button>
+      <span class="hint" id="fetch_hint">скачается в data/raw/&lt;ключ&gt;; повторный запуск
+        перезаписывает папку (это и есть «обновить»). «Задачи» — быстро, анализировать
+        можно сразу; «История» нужна метрикам циклов/переоткрытий — её можно докачать
+        позже. Тестовая jira "apache" работает без токена. Прерванная выгрузка не
+        пропадает: можно «Продолжить» с места остановки.</span>
     </div>
     <div id="resume_banner" class="hidden"></div>
   </div>
@@ -234,14 +242,42 @@ fetch('/api/metrics').then(r => r.json()).then(data => {
 });
 
 loadDownloads();
+onPhaseChange();
 
 // ---------------- модальное окно ----------------
+
+// данные, которых нет у выбранной выгрузки: {"events", ...}
+function missingDataFor(folder) {
+  const d = DOWNLOADS.find(x => x.folder === folder);
+  const missing = [];
+  if (d && !d.has_changelog) missing.push('events');
+  return missing;
+}
+
+// подсказка для метрики, которой не хватает данных выбранной выгрузки
+const REQUIRES_RU = { events: 'история изменений' };
+function metricHint(m, missing) {
+  const need = (m.requires || []).filter(r => missing.includes(r));
+  if (!need.length) return '';
+  return 'нужна ' + need.map(r => REQUIRES_RU[r] || r).join(' и ') +
+         ': запусти выгрузку с «историей изменений» или «Докачать историю»';
+}
 
 function openModal() {
   editIndex = null;
   const sel = document.getElementById('m_select');
   sel.value = '';
   sel.disabled = false;
+  // метрики с недоступными данными — неактивны, при наведении подсказка
+  const missing = missingDataFor(dlFolder);
+  for (const o of sel.options) {
+    const m = METRICS.find(x => x.id === o.value);
+    const hint = m ? metricHint(m, missing) : '';
+    o.disabled = Boolean(hint);
+    o.title = hint;
+    o.textContent = (m ? m.label + ((m.params || []).length ? '  ⚙' : '') : o.textContent) +
+                    (hint ? '  ⚠' : '');
+  }
   document.getElementById('m_fields').innerHTML = '';
   document.getElementById('m_title').textContent = 'Добавить метрику';
   document.getElementById('m_add_btn').textContent = 'Добавить';
@@ -472,7 +508,7 @@ function renderDownloads() {
   const t = document.createElement('table');
   t.className = 'dl';
   const thead = el('thead');
-  ['Выбор', 'Ключ', 'Jira', 'Задач', 'Событий', 'Выгружено (UTC)'].forEach(h => {
+  ['Выбор', 'Ключ', 'Jira', 'Задач', 'История', 'Выгружено (UTC)', ''].forEach(h => {
     thead.appendChild(el('th', null, h));
   });
   t.appendChild(thead);
@@ -485,10 +521,24 @@ function renderDownloads() {
     tr.appendChild(el('td', 'slabel', d.folder));
     tr.appendChild(el('td', null, d.jira_type || '—'));
     const tdIssues = el('td', 'num', d.issues === null || d.issues === undefined ? '—' : d.issues);
-    const tdEvents = el('td', 'num', d.changelog_events === null || d.changelog_events === undefined ? '—' : d.changelog_events);
     tr.appendChild(tdIssues);
+    // история: «✓ N событий» / «—» с подсказкой, почему пусто
+    const hasCl = d.has_changelog || (d.changelog_events !== null && d.changelog_events !== undefined);
+    const tdEvents = el('td', 'num', hasCl ? (d.changelog_events ?? '✓') : '—');
+    tdEvents.title = hasCl ? 'история изменений скачана'
+      : 'история не скачана: метрики циклов/переоткрытий недоступны — «Докачать историю» справа';
     tr.appendChild(tdEvents);
     tr.appendChild(el('td', null, fmtFetched(d.fetched_at)));
+    const tdAct = el('td');
+    if (!hasCl) {
+      const btn = document.createElement('button');
+      btn.className = 'mini';
+      btn.textContent = 'Докачать историю';
+      btn.title = 'докачать changelog к уже скачанным задачам (issues.jsonl не трогается)';
+      btn.onclick = (e) => { e.stopPropagation(); fetchChangelogOnly(d); };
+      tdAct.appendChild(btn);
+    }
+    tr.appendChild(tdAct);
     tbody.appendChild(tr);
   });
   t.appendChild(tbody);
@@ -504,20 +554,50 @@ function updateRunHint() {
 
 // ---------------- запуск (fetch и анализ — один механизм заданий) ----------------
 
+// ---------------- запуск (fetch и анализ — один механизм заданий) ----------------
+
+// фазы из чекбоксов: хотя бы одна; "changelog" качает историю к уже скачанным задачам
+function phasesFromUI() {
+  const issues = document.getElementById('phase_issues').checked;
+  const changelog = document.getElementById('phase_changelog').checked;
+  if (issues && changelog) return 'both';
+  return issues ? 'issues' : (changelog ? 'changelog' : null);
+}
+
+function onPhaseChange() {
+  const issues = document.getElementById('phase_issues').checked;
+  const changelog = document.getElementById('phase_changelog').checked;
+  const btn = document.getElementById('fetch_btn');
+  btn.textContent = issues && changelog ? 'Скачать'
+    : (issues ? 'Скачать задачи' : (changelog ? 'Докачать историю' : 'Скачать'));
+  // комментарии и лимит/даты относятся только к фазе задач
+  document.getElementById('comments_label').style.opacity = issues ? '1' : '0.4';
+  document.getElementById('with_comments').disabled = !issues;
+  document.getElementById('max_issues').disabled = !issues;
+  document.getElementById('date_from').disabled = !issues;
+  document.getElementById('date_to').disabled = !issues;
+  const hint = document.getElementById('fetch_hint');
+  if (!issues && !changelog) hint.textContent = 'отметь хотя бы одну фазу: «задачи» и/или «история изменений»';
+  else if (!issues) hint.textContent = 'история докачивается к УЖЕ скачанным задачам этой папки (issues.jsonl не перезаписывается)';
+  else hint.textContent = 'скачается в data/raw/<ключ>; повторный запуск перезаписывает папку. «История» нужна метрикам циклов/переоткрытий — можно докачать позже.';
+}
+
 function startFetch(mode) {   // mode: undefined | 'resume' | 'fresh'
   const project = document.getElementById('project').value.trim();
   if (!project) { alert('Укажи ключ проекта'); return; }
+  const phases = phasesFromUI();
+  if (!phases) { alert('Отметь хотя бы одну фазу: «задачи» и/или «история изменений»'); return; }
   const jt = document.getElementById('jira_type').value;
   const known = DOWNLOADS.find(d => d.folder === project);
-  if (known && known.jira_type && known.jira_type !== jt &&
+  if (phases !== 'changelog' && known && known.jira_type && known.jira_type !== jt &&
       !confirm('В папке «' + project + '» уже лежит выгрузка из другой Jira (' +
                known.jira_type + '). Перезаписать её выгрузкой из ' + jt + '?')) return;
   let resume = false, fresh = false;
   const partial = known && known.partial;
   if (mode === 'resume') resume = true;
   else if (mode === 'fresh') fresh = true;
-  else if (partial) {
-    // «Скачать задачи» при незавершённом прогрессе — выбор через диалог
+  else if (partial && phases !== 'changelog') {
+    // «Скачать» при незавершённом прогрессе — выбор через диалог
     if (confirm('У «' + project + '» есть незавершённая выгрузка (' +
                 partialText(partial) + ').\n\nОК — продолжить её, Отмена — начать заново с нуля.'))
       resume = true;
@@ -527,12 +607,31 @@ function startFetch(mode) {   // mode: undefined | 'resume' | 'fresh'
   launchJob('/api/fetch', {
     project,
     jira_type: jt,
-    max_issues: document.getElementById('max_issues').value
-                ? +document.getElementById('max_issues').value : null,
-    date_from: document.getElementById('date_from').value || null,
-    date_to: document.getElementById('date_to').value || null,
-    with_comments: document.getElementById('with_comments').checked,
+    max_issues: phases !== 'issues' ? null :
+      (document.getElementById('max_issues').value
+        ? +document.getElementById('max_issues').value : null),
+    date_from: phases === 'issues' || phases === 'both'
+      ? (document.getElementById('date_from').value || null) : null,
+    date_to: phases === 'issues' || phases === 'both'
+      ? (document.getElementById('date_to').value || null) : null,
+    with_comments: phases !== 'issues' ? false
+      : document.getElementById('with_comments').checked,
+    phases,
     resume, fresh,
+  }, 'fetch');
+}
+
+// «Докачать историю» в таблице выгрузок: changelog к готовой папке
+function fetchChangelogOnly(d) {
+  const partial = d.partial;
+  if (partial && !confirm('У «' + d.folder + '» есть незавершённая выгрузка (' +
+      partialText(partial) + '). Продолжить её вместо докачки истории?'))
+    return;
+  launchJob('/api/fetch', {
+    project: d.folder,
+    jira_type: d.jira_type || 'apache',
+    phases: 'changelog',
+    resume: false, fresh: false,
   }, 'fetch');
 }
 

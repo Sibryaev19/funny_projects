@@ -10,10 +10,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 
 import pandas as pd
+
+log = logging.getLogger(__name__)
 
 DONE_HINTS = ("done", "closed", "resolved", "выполн", "закрыт", "решен", "готов")
 WORK_HINTS = ("progress", "review", "test", "develop", "reopened",
@@ -76,7 +79,44 @@ def _dt(v) -> pd.Timestamp:
     return pd.to_datetime(v, errors="coerce", utc=True)
 
 
-def load_tables(raw_dir: Path) -> dict[str, pd.DataFrame]:
+ISSUE_COLUMNS = ["key", "summary", "type", "status", "status_category", "priority",
+                 "assignee", "reporter", "created", "updated", "resolved_at",
+                 "resolution", "duedate", "components", "parent", "n_subtasks",
+                 "timespent_h"]
+EVENT_COLUMNS = ["key", "time", "author", "field", "from", "to"]
+COMMENT_COLUMNS = ["key", "author", "created"]
+
+
+def load_tables(raw_dir: Path, use_cache: bool = True) -> dict[str, pd.DataFrame]:
+    """Таблицы выгрузки. Свежий parquet-кеш (data/processed/<ключ>/, см.
+    cache.py) читается сразу; иначе сырые JSONL разбираются здесь и кеш
+    обновляется. use_cache=False — всегда из JSONL (проверки/диагностика)."""
+    from .cache import HAVE_PARQUET, _fresh, _load_parquet, _signature, _store, processed_dir
+
+    raw_dir = Path(raw_dir)
+
+    schemas = {"issues": ISSUE_COLUMNS, "events": EVENT_COLUMNS,
+               "comments": COMMENT_COLUMNS}
+    if use_cache and HAVE_PARQUET:
+        proc = processed_dir(raw_dir)
+        if _fresh(raw_dir, proc):
+            try:
+                return _load_parquet(proc, schemas)
+            except Exception:   # битый кеш — пересобираем из JSONL
+                log.warning("Parquet-кеш не читается, пересобираю: %s", proc)
+
+    tables = _build_tables(raw_dir, schemas)
+    if use_cache and HAVE_PARQUET:
+        try:
+            sig = _signature(raw_dir)
+            if sig is not None:
+                _store(processed_dir(raw_dir), tables, sig)
+        except Exception:
+            log.exception("Не записать parquet-кеш (работаем без него)")
+    return tables
+
+
+def _build_tables(raw_dir: Path, schemas: dict[str, list[str]]) -> dict[str, pd.DataFrame]:
     rows = []
     for issue in _iter_dedup(raw_dir / "issues.jsonl"):
         f = issue.get("fields") or {}
@@ -99,7 +139,7 @@ def load_tables(raw_dir: Path) -> dict[str, pd.DataFrame]:
             "n_subtasks": len(f.get("subtasks") or []),
             "timespent_h": round((f.get("timespent") or 0) / 3600, 2),
         })
-    issues = pd.DataFrame(rows)
+    issues = pd.DataFrame(rows, columns=ISSUE_COLUMNS)
 
     events = []
     for rec in _iter_dedup(raw_dir / "changelog.jsonl"):
@@ -115,7 +155,7 @@ def load_tables(raw_dir: Path) -> dict[str, pd.DataFrame]:
                     "from": it.get("fromString"),
                     "to": it.get("toString"),
                 })
-    events_df = pd.DataFrame(events, columns=["key", "time", "author", "field", "from", "to"])
+    events_df = pd.DataFrame(events, columns=EVENT_COLUMNS)
 
     comments = []
     for rec in _iter_dedup(raw_dir / "comments.jsonl"):
@@ -125,7 +165,7 @@ def load_tables(raw_dir: Path) -> dict[str, pd.DataFrame]:
                 "author": (c.get("author") or {}).get("displayName"),
                 "created": _dt(c.get("created")),
             })
-    comments_df = pd.DataFrame(comments, columns=["key", "author", "created"])
+    comments_df = pd.DataFrame(comments, columns=COMMENT_COLUMNS)
 
     return {"issues": issues, "events": events_df, "comments": comments_df}
 

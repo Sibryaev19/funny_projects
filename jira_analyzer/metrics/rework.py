@@ -18,6 +18,7 @@ def _reopens(tables: dict[str, pd.DataFrame]) -> pd.Series:
 
 
 class ReworkIssues(BaseMetric):
+    requires = ("issues", "events")
     id = "rework_issues"
     label = "Переоткрытия (по задаче)"
     description = "сколько раз каждая задача переоткрывалась после Done"
@@ -42,6 +43,7 @@ class ReworkIssues(BaseMetric):
 
 
 class ReworkSummary(BaseMetric):
+    requires = ("issues", "events")
     id = "rework_summary"
     label = "Сводка переоткрытий"
     description = "доля переоткрытых задач и распределение числа переоткрытий"

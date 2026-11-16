@@ -24,7 +24,8 @@ class PipelineOptions:
     project: str
     jira_type: str = "apache"
     max_issues: int | None = None
-    skip_changelog: bool = False
+    phases: str = "both"          # выгрузка: both | issues | changelog
+    skip_changelog: bool = False  # устаревший алиас phases="issues"
     with_comments: bool | None = None
     date_from: str | None = None
     date_to: str | None = None
@@ -51,6 +52,7 @@ def run_fetch(opts: PipelineOptions) -> dict:
     raw_dir = fetch_project(
         opts.project, opts.jira_type,
         max_issues=opts.max_issues,
+        phases=opts.phases,
         skip_changelog=opts.skip_changelog,
         with_comments=opts.with_comments,
         date_from=opts.date_from, date_to=opts.date_to,
@@ -73,6 +75,20 @@ def _instances(metrics: list | None) -> list[dict]:
         else:
             raise ValueError(f"Некорректный экземпляр метрики: {m!r}")
     return out
+
+
+_DATA_RU = {"issues": "задачи", "events": "история изменений (changelog)",
+            "comments": "комментарии"}
+
+
+def _missing_data_hint(metric, missing: list[str], project: str) -> str:
+    """Понятное сообщение вместо упавшей метрики: чего нет и как докачать."""
+    what = ", ".join(_DATA_RU.get(r, r) for r in missing)
+    hint = ""
+    if "events" in missing:
+        hint = (" Докачать историю: web — кнопка «Докачать историю» у выгрузки, "
+                f"CLI — python -m src.fetch.run --project {project} --phases changelog")
+    return f"Метрике нужны данные, которых нет в выгрузке: {what}.{hint}"
 
 
 def run_pipeline(opts: PipelineOptions) -> dict:
@@ -102,11 +118,27 @@ def run_pipeline(opts: PipelineOptions) -> dict:
         raise ValueError(f"Неизвестные метрики: {unknown}. "
                          f"Доступны: {sorted(METRICS)} (список: python main.py --list-metrics)")
 
+    # что реально есть в выгрузке (наличие файлов, не пустота таблиц:
+    # пустые события — законный случай проекта без изменений)
+    available = {"issues"}
+    if raw_dir.joinpath("changelog.jsonl").exists():
+        available.add("events")
+    if raw_dir.joinpath("comments.jsonl").exists():
+        available.add("comments")
+
     results: list[MetricResult] = []
     errors: list[dict] = []
     for inst in selected:   # порядок экземпляров = порядок в отчёте
         metric = METRICS[inst["metric_id"]]
         t0 = time.monotonic()
+        missing = [r for r in getattr(metric, "requires", ("issues",)) if r not in available]
+        if missing:
+            errors.append({
+                "metric_id": metric.id,
+                "error": _missing_data_hint(metric, missing, opts.project),
+                "params_label": params_label(metric.params, inst["params"]),
+            })
+            continue
         try:
             values = resolve_params(metric.params, inst["params"])
             plabel = params_label(metric.params, values)

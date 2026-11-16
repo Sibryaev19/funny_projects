@@ -55,6 +55,10 @@ class BaseMetric(ABC):
     label: str = ""         # человекочитаемое имя (заголовок блока)
     description: str = ""   # пояснение, показывается под заголовком
     params: list = []       # декларация Param(...), запрашиваемых у пользователя
+    # какие таблицы выгрузки нужны: "issues" | "events" | "comments".
+    # Метрика с "events" недоступна, пока история изменений не скачана
+    # (web: неактивна с подсказкой; CLI: понятная ошибка, не падение).
+    requires: tuple = ("issues",)
 
     @abstractmethod
     def build(self, tables: dict[str, pd.DataFrame], opts: MetricOpts) -> list:

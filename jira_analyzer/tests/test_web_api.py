@@ -16,10 +16,10 @@ from src.web import app as app_mod
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "RAW_ROOT", tmp_path / "raw")
-    # задания не запускаем: фиксируем параметры и возвращаем фейковый id
+    # задания не запускаем: фиксируем параметры (последнего вызова) и возвращаем фейковый id
     captured = {}
     monkeypatch.setattr(app_mod, "start_job",
-                        lambda opts: captured.setdefault("opts", opts) and "job-1")
+                        lambda opts: (captured.update(opts=opts), "job-1")[1])
     return TestClient(app_mod.app), captured
 
 
@@ -71,6 +71,24 @@ def test_fetch_partial_requires_explicit_choice(client):
     assert r.status_code == 200
     r = c.post("/api/fetch", json={"project": "OTHER", "resume": True})
     assert r.status_code == 400        # resume без прогресса
+
+
+def test_fetch_phases_param(client):
+    """phases доходит до PipelineOptions; changelog-only не валидирует даты
+    (они не участвуют) и не требует их, issues-фаза — требует."""
+    c, captured = client
+    r = c.post("/api/fetch", json={"project": "PROJ", "phases": "кривая"})
+    assert r.status_code == 400
+    r = c.post("/api/fetch", json={"project": "PROJ", "phases": "issues",
+                                   "date_from": "01.02.2024"})
+    assert r.status_code == 400        # даты для задач валидируются
+    r = c.post("/api/fetch", json={"project": "PROJ", "phases": "changelog",
+                                   "date_from": "кривая"})
+    assert r.status_code == 200        # changelog-only даты не смотрит
+    assert captured["opts"].phases == "changelog"
+    r = c.post("/api/fetch", json={"project": "PROJ", "phases": "issues"})
+    assert r.status_code == 200
+    assert captured["opts"].phases == "issues"
 
 
 def _raw_root(client):
