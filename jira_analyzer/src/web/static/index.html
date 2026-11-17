@@ -116,6 +116,13 @@
         <input id="date_to" placeholder="2025-01-01">
       </div>
       <div class="field">
+        <label>Даты — по какому полю</label>
+        <select id="date_field">
+          <option value="created">создания (created)</option>
+          <option value="updated">обновления (updated)</option>
+        </select>
+      </div>
+      <div class="field">
         <label>Лимит задач (тест, пусто = все)</label>
         <input id="max_issues" type="number" min="1" placeholder="50">
       </div>
@@ -130,14 +137,17 @@
       <label style="display:flex;gap:8px;align-items:center;cursor:pointer" id="comments_label">
         <input type="checkbox" id="with_comments"> комментарии
       </label>
+      <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
+        <input type="checkbox" id="update_mode" onchange="onUpdateModeChange()"> обновить (только изменения)
+      </label>
     </div>
     <div class="row" style="margin-top:14px">
       <button id="fetch_btn" onclick="startFetch()">Скачать</button>
-      <span class="hint" id="fetch_hint">скачается в data/raw/&lt;ключ&gt;; повторный запуск
-        перезаписывает папку (это и есть «обновить»). «Задачи» — быстро, анализировать
-        можно сразу; «История» нужна метрикам циклов/переоткрытий — её можно докачать
-        позже. Тестовая jira "apache" работает без токена. Прерванная выгрузка не
-        пропадает: можно «Продолжить» с места остановки.</span>
+      <span class="hint" id="fetch_hint">скачается в data/raw/&lt;ключ&gt;; «Обновить» докачивает
+        только задачи, изменённые с прошлого коммита, и вмерживает их в папку (минуты вместо
+        часов). «Задачи» — быстро, анализировать можно сразу; «История» нужна метрикам
+        циклов/переоткрытий — её можно докачать позже. Тестовая jira "apache" работает без
+        токена. Прерванная выгрузка не пропадает: можно «Продолжить» с места остановки.</span>
     </div>
     <div id="resume_banner" class="hidden"></div>
   </div>
@@ -576,10 +586,22 @@ function onPhaseChange() {
   document.getElementById('max_issues').disabled = !issues;
   document.getElementById('date_from').disabled = !issues;
   document.getElementById('date_to').disabled = !issues;
+  onUpdateModeChange();
   const hint = document.getElementById('fetch_hint');
   if (!issues && !changelog) hint.textContent = 'отметь хотя бы одну фазу: «задачи» и/или «история изменений»';
   else if (!issues) hint.textContent = 'история докачивается к УЖЕ скачанным задачам этой папки (issues.jsonl не перезаписывается)';
-  else hint.textContent = 'скачается в data/raw/<ключ>; повторный запуск перезаписывает папку. «История» нужна метрикам циклов/переоткрытий — можно докачать позже.';
+  else hint.textContent = 'скачается в data/raw/<ключ>; «Обновить» докачивает только изменения и мержит их в папку. «История» нужна метрикам циклов/переоткрытий — можно докачать позже.';
+}
+
+// «Обновить» = инкремент: даты всегда по updated от прошлого коммита,
+// лимит и date_to несовместимы — гасим соответствующие поля
+function onUpdateModeChange() {
+  const upd = document.getElementById('update_mode').checked;
+  document.getElementById('date_field').value = upd ? 'updated' : 'created';
+  document.getElementById('date_field').disabled = upd;
+  if (upd) document.getElementById('date_to').value = '';
+  document.getElementById('date_to').disabled = upd || !document.getElementById('phase_issues').checked;
+  document.getElementById('max_issues').disabled = upd || !document.getElementById('phase_issues').checked;
 }
 
 function startFetch(mode) {   // mode: undefined | 'resume' | 'fresh'
@@ -593,6 +615,11 @@ function startFetch(mode) {   // mode: undefined | 'resume' | 'fresh'
       !confirm('В папке «' + project + '» уже лежит выгрузка из другой Jira (' +
                known.jira_type + '). Перезаписать её выгрузкой из ' + jt + '?')) return;
   let resume = false, fresh = false;
+  const incremental = document.getElementById('update_mode').checked && phases !== 'changelog';
+  if (incremental && !(known && known.fetched_at)) {
+    alert('Обновлять нечего: у «' + project + '» ещё нет готовой выгрузки. Сначала скачай её полностью.');
+    return;
+  }
   const partial = known && known.partial;
   if (mode === 'resume') resume = true;
   else if (mode === 'fresh') fresh = true;
@@ -607,13 +634,16 @@ function startFetch(mode) {   // mode: undefined | 'resume' | 'fresh'
   launchJob('/api/fetch', {
     project,
     jira_type: jt,
-    max_issues: phases !== 'issues' ? null :
+    incremental,
+    date_field: incremental ? 'updated'
+      : document.getElementById('date_field').value,
+    max_issues: incremental || phases !== 'issues' ? null :
       (document.getElementById('max_issues').value
         ? +document.getElementById('max_issues').value : null),
     date_from: phases === 'issues' || phases === 'both'
       ? (document.getElementById('date_from').value || null) : null,
-    date_to: phases === 'issues' || phases === 'both'
-      ? (document.getElementById('date_to').value || null) : null,
+    date_to: incremental || !(phases === 'issues' || phases === 'both')
+      ? null : (document.getElementById('date_to').value || null),
     with_comments: phases !== 'issues' ? false
       : document.getElementById('with_comments').checked,
     phases,

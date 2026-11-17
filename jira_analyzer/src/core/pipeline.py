@@ -29,6 +29,8 @@ class PipelineOptions:
     with_comments: bool | None = None
     date_from: str | None = None
     date_to: str | None = None
+    date_field: str = "created"   # по какому полю фильтровать даты
+    incremental: bool = False     # инкремент: только updated >= прошлого коммита, мерж
     # Экземпляры метрик: {"metric_id": str, "params": dict} (или просто "id").
     # None/пусто = все зарегистрированные с дефолтными параметрами.
     metrics: list | None = None
@@ -56,6 +58,7 @@ def run_fetch(opts: PipelineOptions) -> dict:
         skip_changelog=opts.skip_changelog,
         with_comments=opts.with_comments,
         date_from=opts.date_from, date_to=opts.date_to,
+        date_field=opts.date_field, incremental=opts.incremental,
         resume=opts.resume, fresh=opts.fresh,
         stop_event=opts.stop_event, progress=opts.progress,
     )

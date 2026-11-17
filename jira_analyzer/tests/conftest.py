@@ -116,7 +116,7 @@ class FakeJira:
     @staticmethod
     def _parse_ts(s: str) -> datetime:
         s = s.strip('"')
-        for fmt in ("%Y/%m/%d %H:%M", "%Y-%m-%d"):
+        for fmt in ("%Y/%m/%d %H:%M", "%Y-%m-%d", "%Y-%m-%d %H:%M"):
             try:
                 return datetime.strptime(s, fmt)
             except ValueError:
@@ -127,12 +127,16 @@ class FakeJira:
         jql = params.get("jql", "")
         keys = None
         lo = hi = None
+        field = "created"
         m = re.search(r"key in \(([^)]*)\)", jql)
         if m:
             keys = [k.strip() for k in m.group(1).split(",") if k.strip()]
         else:
-            mlo = re.search(r'created >= "([^"]+)"', jql)
-            mhi = re.search(r'created < "([^"]+)"', jql)
+            mfield = re.search(r'\b(created|updated) >= "', jql)
+            if mfield:
+                field = mfield.group(1)
+            mlo = re.search(r'(?:created|updated) >= "([^"]+)"', jql)
+            mhi = re.search(r'(?:created|updated) < "([^"]+)"', jql)
             lo = self._parse_ts(mlo.group(1)) if mlo else None
             hi = self._parse_ts(mhi.group(1)) if mhi else None
 
@@ -142,11 +146,11 @@ class FakeJira:
                 if iss["key"] in keys:
                     selected.append(iss)
                 continue
-            created = datetime.strptime(iss["fields"]["created"][:19],
-                                        "%Y-%m-%dT%H:%M:%S")
-            if lo is not None and created < lo:
+            stamp = datetime.strptime(iss["fields"][field][:19],
+                                      "%Y-%m-%dT%H:%M:%S")
+            if lo is not None and stamp < lo:
                 continue
-            if hi is not None and created >= hi:
+            if hi is not None and stamp >= hi:
                 continue
             selected.append(iss)
         selected.sort(key=lambda x: x["fields"]["created"])

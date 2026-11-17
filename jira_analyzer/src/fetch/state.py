@@ -20,7 +20,8 @@ STATE_NAME = "state.json"
 
 
 def fingerprint(project: str, jira_type: str, url: str, *, date_from, date_to,
-                max_issues, phases, with_comments, fields) -> dict:
+                max_issues, phases, with_comments, fields,
+                date_field="created") -> dict:
     """Отпечаток параметров: продолжать можно только полностью совпадающую
     выгрузку (иначе в одной папке смешаются данные разных настроек)."""
     return {
@@ -29,6 +30,7 @@ def fingerprint(project: str, jira_type: str, url: str, *, date_from, date_to,
         "url": url,
         "date_from": date_from,
         "date_to": date_to,
+        "date_field": date_field,
         "max_issues": max_issues,
         "phases": phases,
         "with_comments": with_comments,

@@ -35,29 +35,55 @@ def _parse_date(value: str, name: str) -> dt.date:
         raise ValueError(f"{name}: ожидалась дата ГГГГ-ММ-ДД, получено {value!r}") from None
 
 
+def _parse_moment(value: str, name: str) -> dt.datetime:
+    """Дата или момент с временем: «ГГГГ-ММ-ДД» или «ГГГГ-ММ-ДД ЧЧ:ММ».
+
+    Момент нужен инкременту: нижняя граница = fetched_at прошлого коммита,
+    а не полночь какого-то дня (иначе за сутки до коммита попадут дубли)."""
+    text = value.strip()
+    try:
+        return dt.datetime.fromisoformat(text)
+    except ValueError:
+        pass
+    try:
+        return dt.datetime.combine(_parse_date(text, name), dt.time.min)
+    except (ValueError, AttributeError):
+        raise ValueError(f"{name}: ожидались дата ГГГГ-ММ-ДД "
+                         f"или момент ГГГГ-ММ-ДД ЧЧ:ММ, получено {value!r}") from None
+
+
 def validate_dates(date_from: str | None, date_to: str | None) -> None:
-    """Даты фильтра выгрузки: YYYY-MM-DD, date_from не позже date_to.
+    """Даты фильтра выгрузки: YYYY-MM-DD (или момент с ЧЧ:ММ для инкремента),
+    date_from не позже date_to.
 
     Единая точка валидации: web-эндпоинты оборачивают ValueError в 400,
     CLI/fetch получают понятный текст вместо кривого JQL.
     """
-    lo = _parse_date(date_from, "date_from") if date_from else None
-    hi = _parse_date(date_to, "date_to") if date_to else None
+    lo = _parse_moment(date_from, "date_from") if date_from else None
+    hi = (dt.datetime.combine(_parse_date(date_to, "date_to"), dt.time.min)
+          if date_to else None)
     if lo and hi and lo > hi:
         raise ValueError(f"date_from ({date_from}) позже date_to ({date_to})")
 
 
+DATE_FIELDS = ("created", "updated")
+
+
 def build_jql(project_key: str, date_from: str | None = None,
-              date_to: str | None = None, order: str = "created ASC") -> str:
+              date_to: str | None = None, order: str = "created ASC",
+              date_field: str = "created") -> str:
     """JQL основной выгрузки: ключ в кавычках, date_to включительно
-    (дата без времени = полночь, поэтому верхняя граница строго < следующего дня)."""
+    (дата без времени = полночь, поэтому верхняя граница строго < следующего дня).
+    date_field — по какому полю фильтровать: created или updated."""
+    if date_field not in DATE_FIELDS:
+        raise ValueError(f"date_field: ожидалось одно из {DATE_FIELDS}, получено {date_field!r}")
     validate_dates(date_from, date_to)
     jql = f'project = "{project_key}"'
     if date_from:
-        jql += f' AND created >= "{date_from}"'
+        jql += f' AND {date_field} >= "{date_from}"'
     if date_to:
         nxt = _parse_date(date_to, "date_to") + dt.timedelta(days=1)
-        jql += f' AND created < "{nxt.isoformat()}"'
+        jql += f' AND {date_field} < "{nxt.isoformat()}"'
     jql += f" ORDER BY {order}"
     return jql
 
@@ -88,6 +114,7 @@ def iter_issues(
     max_issues: int | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    date_field: str = "created",
     start_at: int = 0,
     seen: set | None = None,
     on_total=None,
@@ -97,26 +124,31 @@ def iter_issues(
     start_at — позиция продолжения (возобновление выгрузки); seen — ключи,
     скачанные раньше (дедуп на стыках окон); on_total(total) вызывается,
     когда сервер сообщил общий размер выборки (прогресс в UI).
+    date_field — по какому полю фильтровать: created или updated
+    (updated — инкремент/период изменений; date_from может нести время).
     """
+    if date_field not in DATE_FIELDS:
+        raise ValueError(f"date_field: ожидалось одно из {DATE_FIELDS}, получено {date_field!r}")
     validate_dates(date_from, date_to)
     st = _State(max_issues, start_at, seen)
-    lo = (dt.datetime.combine(_parse_date(date_from, "date_from"), dt.time.min)
-          if date_from else dt.datetime(1970, 1, 1))
+    lo = _parse_moment(date_from, "date_from") if date_from else dt.datetime(1970, 1, 1)
     hi = (dt.datetime.combine(_parse_date(date_to, "date_to"), dt.time.min)
           + dt.timedelta(days=1) if date_to else None)  # None = до текущего момента
-    yield from _window(client, project_key, fields, lo, hi, page_size, st, on_total, 0)
+    yield from _window(client, project_key, fields, lo, hi, page_size, st, on_total, 0,
+                       date_field)
     if st.fallbacks:
-        log.warning("Пагинация: %d раз(а) диапазон делился по created "
-                    "(сервер ограничивает глубину startAt)", st.fallbacks)
+        log.warning("Пагинация: %d раз(а) диапазон делился по %s "
+                    "(сервер ограничивает глубину startAt)", st.fallbacks, date_field)
 
 
 def _window(client: JiraClient, project_key: str, fields: list[str],
             lo: dt.datetime, hi: dt.datetime | None, page_size: int,
-            st: _State, on_total, depth: int) -> Iterator[dict]:
+            st: _State, on_total, depth: int,
+            date_field: str = "created") -> Iterator[dict]:
     """Выдать задачи окна [lo, hi); hi=None — без верхней границы."""
-    jql = f'project = "{project_key}" AND created >= "{_ts(lo)}"'
+    jql = f'project = "{project_key}" AND {date_field} >= "{_ts(lo)}"'
     if hi is not None:
-        jql += f' AND created < "{_ts(hi)}"'
+        jql += f' AND {date_field} < "{_ts(hi)}"'
     jql += " ORDER BY created ASC"
     params = {
         "jql": jql,
@@ -139,9 +171,10 @@ def _window(client: JiraClient, project_key: str, fields: list[str],
             # (даже если в окне были уже скачанные ключи — за границей cap могут
             # быть новые, поэтому продолжаем только делением диапазона)
             st.fallbacks += 1
-            log.warning("Пагинация оборвана в окне [%s .. %s): %d из %s — делю по created",
-                        _ts(lo), _ts(hi) if hi else "…", new_in_window, total)
-            yield from _split(client, project_key, fields, lo, hi, page_size, st, on_total, depth)
+            log.warning("Пагинация оборвана в окне [%s .. %s): %d из %s — делю по %s",
+                        _ts(lo), _ts(hi) if hi else "…", new_in_window, total, date_field)
+            yield from _split(client, project_key, fields, lo, hi, page_size, st, on_total,
+                              depth, date_field)
             return
         for issue in batch:
             key = issue.get("key")
@@ -161,7 +194,8 @@ def _window(client: JiraClient, project_key: str, fields: list[str],
 
 def _split(client: JiraClient, project_key: str, fields: list[str],
            lo: dt.datetime, hi: dt.datetime | None, page_size: int,
-           st: _State, on_total, depth: int) -> Iterator[dict]:
+           st: _State, on_total, depth: int,
+           date_field: str = "created") -> Iterator[dict]:
     """Разделить окно пополам и выкачать обе половины по очереди."""
     if hi is None:  # открытая верхняя граница — текущий момент + сутки
         hi = dt.datetime.now() + dt.timedelta(days=1)
@@ -171,5 +205,7 @@ def _split(client: JiraClient, project_key: str, fields: list[str],
                   "внутри часа — выгрузка будет неполной, уменьши диапазон дат",
                   _ts(lo), _ts(hi))
         return
-    yield from _window(client, project_key, fields, lo, mid, page_size, st, on_total, depth + 1)
-    yield from _window(client, project_key, fields, mid, hi, page_size, st, on_total, depth + 1)
+    yield from _window(client, project_key, fields, lo, mid, page_size, st, on_total, depth + 1,
+                       date_field)
+    yield from _window(client, project_key, fields, mid, hi, page_size, st, on_total, depth + 1,
+                       date_field)

@@ -53,6 +53,8 @@ class FetchRequest(BaseModel):
     max_issues: int | None = None
     date_from: str | None = None
     date_to: str | None = None
+    date_field: str = "created"   # created | updated
+    incremental: bool = False     # обновить готовую выгрузку (только изменения)
     with_comments: bool = False
     phases: str = "both"   # both | issues | changelog
     resume: bool = False
@@ -147,7 +149,8 @@ def _partial_info(state_path: Path) -> dict | None:
         "totals": s.get("totals") or {},
         "updated_at": s.get("updated_at"),
         "params": {k: fp.get(k) for k in
-                   ("jira_type", "date_from", "date_to", "max_issues", "with_comments")},
+                   ("jira_type", "date_from", "date_to", "date_field",
+                    "max_issues", "with_comments")},
     }
 
 
@@ -158,6 +161,15 @@ def fetch(req: FetchRequest) -> dict:
     project = _check_project(req.project.strip())
     if req.phases not in ("both", "issues", "changelog"):
         raise HTTPException(400, "phases: both | issues | changelog")
+    if req.date_field not in ("created", "updated"):
+        raise HTTPException(400, "date_field: created | updated")
+    if req.incremental:
+        if not (RAW_ROOT / project / "fetch_summary.json").exists():
+            raise HTTPException(400, f"У data/raw/{project} нет готовой выгрузки — "
+                                     f"обновлять нечего, сначала полная выгрузка")
+        if req.max_issues is not None or req.date_to:
+            raise HTTPException(400, "Обновление несовместимо с лимитом задач "
+                                     "и date_to (верхняя граница — «сейчас»)")
     if req.phases != "changelog":
         try:
             validate_dates(req.date_from, req.date_to)
@@ -174,6 +186,7 @@ def fetch(req: FetchRequest) -> dict:
         max_issues=req.max_issues, with_comments=req.with_comments,
         phases=req.phases,
         date_from=req.date_from or None, date_to=req.date_to or None,
+        date_field=req.date_field, incremental=req.incremental,
         resume=req.resume, fresh=req.fresh,
         fetch_only=True,
     )

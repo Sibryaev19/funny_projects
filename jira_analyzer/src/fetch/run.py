@@ -25,6 +25,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -35,7 +37,7 @@ from src.core.tables import iter_records_at, last_line_offsets
 from .changelog import endpoint_available, iter_changelog, iter_changelog_endpoint
 from .client import JiraClient
 from .comments import iter_comments
-from .issues import iter_issues, validate_dates
+from .issues import DATE_FIELDS, iter_issues, validate_dates
 from .state import FetchState, clear_partial, fingerprint, load_state, truncate_files
 from .tree import build_tree
 
@@ -128,6 +130,8 @@ def fetch_project(
     with_comments: bool | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    date_field: str = "created",
+    incremental: bool = False,
     env_path: Path | None = None,
     resume: bool = False,
     fresh: bool = False,
@@ -141,6 +145,15 @@ def fetch_project(
     скачанным задачам (issues.jsonl должен быть в папке; сам не трогается).
     Комментарии тянуться только вместе с задачами.
 
+    date_field="created"|"updated" — по какому полю фильтровать даты
+    (updated + date_from/date_to = период изменений).
+
+    incremental=True — инкрементное обновление готовой выгрузки: качаются
+    только задачи с updated >= fetched_at прошлого коммита (или явного
+    date_from), дельта мержится с существующими JSONL по ключу — последняя
+    запись выигрывает. Требует issues.jsonl + fetch_summary.json в папке;
+    date_to и max_issues несовместимы (верхняя граница всегда «сейчас»).
+
     resume=True — продолжить незавершённую (отпечаток параметров обязан
     совпасть); fresh=True — стереть прогресс и начать заново; без обоих флагов
     при наличии прогресса будет ошибка с подсказкой (выбор — за пользователем).
@@ -148,10 +161,37 @@ def fetch_project(
     progress(phase, done, total) — прогресс для web-интерфейса.
     """
     phases = _norm_phases(phases, skip_changelog)
+    if date_field not in DATE_FIELDS:
+        raise ValueError(f"date_field: ожидалось одно из {DATE_FIELDS}, получено {date_field!r}")
+    if incremental and date_field != "updated":
+        date_field = "updated"   # инкремент по created не имеет смысла
     validate_dates(date_from, date_to)
     cfg = load_config(jira_type, env_path=env_path)
     inst = cfg.jira[jira_type.lower()]
     fs = cfg.fetch
+    out_dir = cfg.data_dir / "raw" / project_key
+    incremental_from: str | None = None
+    if incremental:
+        if date_to:
+            raise ValueError("incremental: date_to несовместим — верхняя граница "
+                             "всегда «сейчас»")
+        if max_issues is not None:
+            raise ValueError("incremental: max_issues несовместим — обновление "
+                             "не должно молча терять часть изменений")
+        summary_path = out_dir / "fetch_summary.json"
+        if not (out_dir / "issues.jsonl").exists() or not summary_path.exists():
+            raise ValueError(
+                f"В data/raw/{project_key} нет готовой выгрузки (issues.jsonl + "
+                f"fetch_summary.json) — инкрементировать нечего, сначала полная выгрузка")
+        prev_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        # явный date_from — строка пользователя как есть; иначе точка = fetched_at
+        # прошлого коммита, приведённая к формату JQL «ГГГГ-ММ-ДД ЧЧ:ММ»
+        incremental_from = (date_from.strip() if date_from
+                            else _norm_jql_ts(prev_summary.get("fetched_at")))
+        if not incremental_from:
+            raise ValueError(f"В fetch_summary.json нет fetched_at — точка отсчёта "
+                             f"инкремента неизвестна, сделай полную выгрузку заново")
+        date_from = incremental_from
     if date_from:
         fs.date_from = date_from
     if date_to:
@@ -176,7 +216,7 @@ def fetch_project(
     fp = fingerprint(project_key, jira_type, inst.url, date_from=fs.date_from,
                      date_to=fs.date_to, max_issues=max_issues,
                      phases=phases, with_comments=pull_comments,
-                     fields=cfg.fields)
+                     fields=cfg.fields, date_field=date_field)
 
     prev = load_state(partial)
     if prev is not None and fresh:
@@ -189,9 +229,13 @@ def fetch_project(
     if resume and prev is None:
         raise ValueError("Незавершённой выгрузки не найдено — запускай без --resume")
     if resume and prev.get("fingerprint") != fp:
-        raise ValueError("Параметры выгрузки изменились с прошлой сессии "
-                         "(даты/лимит/тип Jira/поля) — продолжить нельзя, "
-                         "только начать заново (--fresh)")
+        prev_fp = prev.get("fingerprint") or {}
+        diff = "; ".join(
+            f"{k}: было {prev_fp.get(k)!r} → стало {v!r}"
+            for k, v in fp.items() if prev_fp.get(k) != v)
+        raise ValueError("Параметры выгрузки изменились с прошлой сессии — "
+                         "продолжить нельзя, только начать заново (--fresh). "
+                         f"Разошлись: {diff}")
 
     resumed = prev is not None
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -214,12 +258,13 @@ def fetch_project(
         }
     state = FetchState(partial, prev)
 
-    log.info("=== Выгрузка %s с %s (%s, фазы=%s)%s ===",
-             project_key, inst.url, inst.auth, phases,
+    log.info("=== Выгрузка %s с %s (%s, фазы=%s, поле=%s%s)%s ===",
+             project_key, inst.url, inst.auth, phases, date_field,
+             f" от {incremental_from}" if incremental else "",
              ", продолжение" if resumed else "")
 
     keys = _run_phases(state, client, out_dir, project_key, cfg, fs,
-                       max_issues, phases, pull_comments,
+                       max_issues, phases, pull_comments, date_field,
                        stop_event, progress, resumed)
 
     # ---------- коммит: из _partial в корень папки ----------
@@ -227,12 +272,13 @@ def fetch_project(
     state.save()
     t0 = time.monotonic()
     log.info("Собираю итоговые файлы (дедуп по ключу, последняя запись выигрывает)")
+    commit = _merge_file if incremental else _commit_file
     if phases in ("both", "issues"):
-        _commit_file(partial / "issues.jsonl", out_dir / "issues.jsonl")
+        commit(partial / "issues.jsonl", out_dir / "issues.jsonl")
     if phases in ("both", "changelog"):
-        _commit_file(partial / "changelog.jsonl", out_dir / "changelog.jsonl")
+        commit(partial / "changelog.jsonl", out_dir / "changelog.jsonl")
     if pull_comments:
-        _commit_file(partial / "comments.jsonl", out_dir / "comments.jsonl")
+        commit(partial / "comments.jsonl", out_dir / "comments.jsonl")
 
     tree = build_tree(_read_jsonl(out_dir / "issues.jsonl"), cfg.custom_fields)
     _dump(out_dir / "tree.json", tree)
@@ -243,11 +289,25 @@ def fetch_project(
     if expected is not None and expected != len(keys):
         log.warning("Скачано задач: %d, сервер в total сообщил: %s", len(keys), expected)
     counts["issues_expected"] = expected
-    if phases in ("both", "changelog") and keys:
-        counts["changelog_events"] = state.counts().get("changelog_events", 0)
-        counts["changelog_truncated"] = len(state.data.get("truncated", []))
-    if pull_comments and keys:
-        counts["comments"] = state.counts().get("comments", 0)
+    if incremental:
+        # в summary должны быть итоговые объёмы папки (web её показывает),
+        # поэтому пересчитываем мержёные файлы, а дельту храним отдельно
+        counts["delta_issues"] = len(keys)
+        counts["issues"] = _count_lines(out_dir / "issues.jsonl")
+        prev_counts = (prev_summary or {}).get("counts") or {}
+        if phases in ("both", "changelog"):
+            counts["changelog_events"] = (prev_counts.get("changelog_events", 0)
+                                          + state.counts().get("changelog_events", 0))
+            counts["changelog_truncated"] = len(state.data.get("truncated", []))
+        if pull_comments:
+            counts["comments"] = (prev_counts.get("comments", 0)
+                                  + state.counts().get("comments", 0))
+    else:
+        if phases in ("both", "changelog") and keys:
+            counts["changelog_events"] = state.counts().get("changelog_events", 0)
+            counts["changelog_truncated"] = len(state.data.get("truncated", []))
+        if pull_comments and keys:
+            counts["comments"] = state.counts().get("comments", 0)
 
     summary = {
         "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -257,11 +317,15 @@ def fetch_project(
         "phases": phases,
         "date_from": fs.date_from,
         "date_to": fs.date_to,
+        "date_field": date_field,
         "with_comments": pull_comments,
         "resumed_from_checkpoint": resumed,
         "stages": dict(state.data.get("stages_sec", {})),
         "counts": counts,
     }
+    if incremental:
+        summary["incremental"] = True
+        summary["incremental_from"] = incremental_from
 
     _dump(out_dir / "fetch_summary.json", summary)
     clear_partial(partial)   # только после успешного коммита
@@ -275,7 +339,7 @@ def fetch_project(
 
 
 def _run_phases(state, client, out_dir, project_key, cfg, fs,
-                max_issues, phases, pull_comments,
+                max_issues, phases, pull_comments, date_field,
                 stop_event, progress, resumed) -> list[str]:
     """Фазы выгрузки: задачи -> changelog -> догрузка -> комментарии.
     Возвращает полный список ключей (нужен коммиту). Каждая фаза начинается,
@@ -311,6 +375,7 @@ def _run_phases(state, client, out_dir, project_key, cfg, fs,
             for issue in iter_issues(client, project_key, cfg.fields,
                                      page_size=fs.page_size, max_issues=max_issues,
                                      date_from=fs.date_from, date_to=fs.date_to,
+                                     date_field=date_field,
                                      start_at=start_at, seen=seen,
                                      on_total=on_total):
                 _stopped(stop_event, f"задачи {n}")
@@ -445,6 +510,55 @@ def _commit_file(src: Path, dst: Path) -> None:
             out.write((json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
+def _merge_file(src: Path, dst: Path) -> None:
+    """Инкремент: вмержить дельту из _partial в существующий файл корня.
+    Дельта всегда новее, поэтому по ключу выигрывает её запись; ключи,
+    которых в дельте нет, переносятся из старого файла без изменений.
+    Корневой файл уже дедуплицирован (каждый ключ встречается раз) —
+    старые записи читаем потоком, память не растёт с объёмом папки."""
+    if not src.exists():
+        return
+    if not dst.exists():
+        _commit_file(src, dst)
+        return
+    delta: dict[str, dict] = {}
+    for rec in _read_jsonl(src):
+        key = rec.get("key")
+        if key:
+            delta[key] = rec
+    tmp = dst.with_name(dst.name + ".merge.tmp")
+    with open(tmp, "wb") as out, open(dst, "rb") as old:
+        for line in old:
+            if not line.strip():
+                continue
+            key = json.loads(line).get("key")
+            if key in delta:
+                out.write((json.dumps(delta.pop(key), ensure_ascii=False)
+                           + "\n").encode("utf-8"))
+            else:
+                out.write(line if line.endswith(b"\n") else line + b"\n")
+        for rec in delta.values():
+            out.write((json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8"))
+    os.replace(tmp, dst)
+
+
+def _norm_jql_ts(value) -> str | None:
+    """Момент из fetch_summary (ISO с секундами и TZ) → строка для JQL
+    «ГГГГ-ММ-ДД ЧЧ:ММ». None, если распознать не удалось."""
+    if not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return moment.strftime("%Y-%m-%d %H:%M")
+
+
+def _count_lines(path: Path) -> int:
+    with open(path, "rb") as f:
+        return sum(1 for line in f if line.strip())
+
+
 def _dump(path: Path, obj) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False)
@@ -464,8 +578,13 @@ def main() -> None:
                         help="(устарело) алиас --phases issues")
     parser.add_argument("--with-comments", action="store_true",
                         help="тянуть комментарии (по умолчанию выключены)")
-    parser.add_argument("--date-from", default=None, help="YYYY-MM-DD, включительно")
+    parser.add_argument("--date-from", default=None, help="YYYY-MM-DD (или ГГГГ-ММ-ДД ЧЧ:ММ), включительно")
     parser.add_argument("--date-to", default=None, help="YYYY-MM-DD, включительно")
+    parser.add_argument("--date-field", choices=DATE_FIELDS, default="created",
+                        help="по какому полю фильтровать даты (по умолчанию created)")
+    parser.add_argument("--update", action="store_true",
+                        help="инкрементное обновление готовой выгрузки: только "
+                             "задачи с updated >= прошлого коммита, мерж по ключу")
     parser.add_argument("--resume", action="store_true",
                         help="продолжить незавершённую выгрузку с чекпоинта")
     parser.add_argument("--fresh", action="store_true",
@@ -483,6 +602,7 @@ def main() -> None:
             skip_changelog=args.skip_changelog,
             with_comments=args.with_comments,
             date_from=args.date_from, date_to=args.date_to,
+            date_field=args.date_field, incremental=args.update,
             resume=args.resume, fresh=args.fresh,
             env_path=Path(args.env) if args.env else None,
         )

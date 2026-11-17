@@ -98,8 +98,13 @@ def main() -> None:
                         "история к уже скачанным задачам)")
     p.add_argument("--skip-changelog", action="store_true", help="(устарело) алиас --phases issues")
     p.add_argument("--with-comments", action="store_true", help="тянуть комментарии")
-    p.add_argument("--date-from", default=None, help="YYYY-MM-DD, только задачи с этой даты")
-    p.add_argument("--date-to", default=None, help="YYYY-MM-DD, только до этой даты")
+    p.add_argument("--date-from", default=None, help="YYYY-MM-DD (или ГГГГ-ММ-ДД ЧЧ:ММ), включительно")
+    p.add_argument("--date-to", default=None, help="YYYY-MM-DD, включительно")
+    p.add_argument("--date-field", choices=["created", "updated"], default="created",
+                   help="по какому полю фильтровать даты (по умолчанию created)")
+    p.add_argument("--update", action="store_true",
+                   help="инкрементное обновление готовой выгрузки: только задачи "
+                        "с updated >= прошлого коммита, дельта мержится по ключу")
     p.add_argument("--metrics", default=None,
                    help="экземпляры метрик через запятую, параметры в скобках: "
                         "'stale_issues(stale_days=45),overview' "
@@ -146,6 +151,7 @@ def main() -> None:
         skip_changelog=args.skip_changelog,
         with_comments=args.with_comments,
         date_from=args.date_from, date_to=args.date_to,
+        date_field=args.date_field, incremental=args.update,
         metrics=instances, skip_fetch=args.skip_fetch,
         resume=args.resume, fresh=args.fresh,
     ))
