@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+mss
+numpy
+pillow
+dbus-next; sys_platform == "linux"

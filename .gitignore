@@ -1,0 +1,35 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Виртуальные окружения ---
+.venv/
+venv/
+env/
+
+# --- Личные настройки и секреты ---
+.env
+.env.local
+
+
+# --- IDE и редакторы ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Данные и результаты ---
+received/
+*.log
+
+# --- Системное ---
+.DS_Store
+Thumbs.db
